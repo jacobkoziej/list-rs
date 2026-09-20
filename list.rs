@@ -43,3 +43,5 @@ impl RawNode {
         }
     }
 }
+
+pub trait Role {}
