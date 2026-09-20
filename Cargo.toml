@@ -1,0 +1,7 @@
+[lib]
+path = "list.rs"
+
+[package]
+name = "list"
+version = "0.0.0"
+edition = "2024"
