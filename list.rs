@@ -4,8 +4,9 @@
 // Copyright (C) 2026  Jacob Koziej <jacobkoziej@gmail.com>
 
 use core::cell::UnsafeCell;
-use core::marker::PhantomPinned;
+use core::marker::{PhantomData, PhantomPinned};
 use core::ptr::NonNull;
+use core::sync::atomic::AtomicBool;
 
 type RawNodePtr = UnsafeCell<NonNull<RawNode>>;
 
@@ -45,3 +46,9 @@ impl RawNode {
 }
 
 pub trait Role {}
+
+pub struct Node<T, R: Role> {
+    raw: RawNode,
+    claimed: AtomicBool,
+    _marker: PhantomData<fn() -> (T, R)>,
+}
