@@ -7,9 +7,12 @@
 
 use core::cell::UnsafeCell;
 use core::marker::{PhantomData, PhantomPinned};
+use core::mem::ManuallyDrop;
+use core::ops::{Deref, Drop};
 use core::pin::Pin;
 use core::ptr;
-use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 struct RawNode {
     prev: UnsafeCell<*const RawNode>,
@@ -72,6 +75,19 @@ pub struct Node<T, R: Role> {
     _marker: PhantomData<fn() -> (T, R)>,
 }
 
+impl<T, R> Node<T, R>
+where
+    R: Role,
+{
+    pub unsafe fn new() -> Self {
+        Self {
+            raw: RawNode::new(),
+            claimed: AtomicBool::new(false),
+            _marker: PhantomData,
+        }
+    }
+}
+
 pub unsafe trait Linked<R: Role>
 where
     Self: Sized,
@@ -97,9 +113,99 @@ macro_rules! linked {
     };
 }
 
+pub struct ListArc<T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    arc: Arc<T>,
+    _marker: PhantomData<fn() -> R>,
+}
+
+impl<T, R> ListArc<T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    unsafe fn from_raw(ptr: *const T) -> Self {
+        Self {
+            arc: unsafe { Arc::from_raw(ptr) },
+            _marker: PhantomData,
+        }
+    }
+
+    fn into_raw(self) -> *const T {
+        let this = ManuallyDrop::new(self);
+
+        Arc::as_ptr(&this.arc)
+    }
+
+    pub fn try_from_arc(arc: &Arc<T>) -> Option<Self> {
+        let node: &Node<T, R> = unsafe { &*T::as_node(&**arc) };
+
+        node.claimed
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()?;
+
+        Some(Self {
+            arc: Arc::clone(arc),
+            _marker: PhantomData,
+        })
+    }
+}
+
+impl<T, R> Deref for ListArc<T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.arc
+    }
+}
+
+impl<T, R> Drop for ListArc<T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    fn drop(&mut self) {
+        let node: &Node<T, R> = unsafe { &*T::as_node(&*self.arc) };
+
+        node.claimed.store(false, Ordering::Release);
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
+
+    struct Foo;
+    impl Role for Foo {}
+
+    struct Bar;
+    impl Role for Bar {}
+
+    struct Item {
+        data: u32,
+        foo: Node<Item, Foo>,
+        bar: Node<Item, Bar>,
+    }
+
+    impl Item {
+        fn new(data: u32) -> Self {
+            Self {
+                data,
+                foo: unsafe { Node::<_, Foo>::new() },
+                bar: unsafe { Node::<_, Bar>::new() },
+            }
+        }
+    }
+
+    linked! {Item, Foo, foo}
+    linked! {Item, Bar, bar}
 
     mod raw_node {
         use super::*;
@@ -186,6 +292,63 @@ mod test {
 
             assert!(a.is_singleton());
             assert!(b.is_singleton());
+        }
+    }
+
+    mod list_arc {
+        use super::*;
+
+        #[test]
+        fn only_mints_for_unclaimed() {
+            let arc = Arc::new(Item::new(0));
+
+            let foo = ListArc::<_, Foo>::try_from_arc(&arc);
+
+            assert!(foo.is_some());
+
+            assert!(ListArc::<_, Foo>::try_from_arc(&arc).is_none());
+        }
+
+        #[test]
+        fn into_raw_skips_drop() {
+            let arc = Arc::new(Item::new(0));
+            let foo = ListArc::<_, Foo>::try_from_arc(&arc).unwrap();
+
+            assert_eq!(Arc::strong_count(&arc), 2);
+
+            let ptr = ListArc::into_raw(foo);
+
+            assert_eq!(Arc::strong_count(&arc), 2);
+            assert!(ListArc::<_, Foo>::try_from_arc(&arc).is_none());
+
+            let foo = unsafe { ListArc::<_, Foo>::from_raw(ptr) };
+
+            assert_eq!(Arc::strong_count(&arc), 2);
+
+            drop(foo);
+
+            assert_eq!(Arc::strong_count(&arc), 1);
+        }
+
+        #[test]
+        fn drop_releases_claim() {
+            let arc = Arc::new(Item::new(0));
+
+            let foo = ListArc::<_, Foo>::try_from_arc(&arc).unwrap();
+
+            drop(foo);
+
+            assert!(ListArc::<_, Foo>::try_from_arc(&arc).is_some());
+        }
+
+        #[test]
+        fn deref_item() {
+            let arc = Arc::new(Item::new(1));
+
+            let foo = ListArc::<_, Foo>::try_from_arc(&arc).unwrap();
+
+            assert_eq!(foo.data, 1);
+            assert!(ptr::eq(arc.as_ref(), &*foo));
         }
     }
 }
