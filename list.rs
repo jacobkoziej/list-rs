@@ -6,20 +6,18 @@
 use core::cell::UnsafeCell;
 use core::marker::{PhantomData, PhantomPinned};
 use core::pin::Pin;
-use core::ptr::NonNull;
+use core::ptr;
 use core::sync::atomic::AtomicBool;
 
-type RawNodePtr = UnsafeCell<NonNull<RawNode>>;
-
 struct RawNode {
-    prev: RawNodePtr,
-    next: RawNodePtr,
+    prev: UnsafeCell<*const RawNode>,
+    next: UnsafeCell<*const RawNode>,
     _pin: PhantomPinned,
 }
 
 impl RawNode {
     fn init(self: Pin<&Self>) {
-        let ptr = NonNull::from(self.get_ref());
+        let ptr = ptr::from_ref(self.get_ref());
 
         unsafe {
             *self.as_ref().prev.get() = ptr;
@@ -27,17 +25,18 @@ impl RawNode {
         }
     }
 
-    const fn insert(prev: NonNull<RawNode>, node: NonNull<RawNode>, next: NonNull<RawNode>) {
+    const fn insert(prev: *const RawNode, node: *const RawNode, next: *const RawNode) {
         unsafe {
-            *prev.as_ref().next.get() = node;
-            *node.as_ref().prev.get() = prev;
-            *node.as_ref().next.get() = next;
-            *next.as_ref().prev.get() = node;
+            *(*prev).next.get() = node;
+            *(*node).prev.get() = prev;
+            *(*node).next.get() = next;
+            *(*next).prev.get() = node;
         }
     }
 
     fn is_singleton(&self) -> bool {
-        let ptr = NonNull::from(self);
+        let ptr = ptr::from_ref(self);
+
         let prev = unsafe { &*self.prev.get() };
         let next = unsafe { &*self.next.get() };
 
@@ -46,19 +45,19 @@ impl RawNode {
 
     const fn new() -> Self {
         Self {
-            prev: UnsafeCell::new(NonNull::dangling()),
-            next: UnsafeCell::new(NonNull::dangling()),
+            prev: UnsafeCell::new(ptr::null_mut()),
+            next: UnsafeCell::new(ptr::null_mut()),
             _pin: PhantomPinned,
         }
     }
 
-    const fn remove(prev: NonNull<RawNode>, node: NonNull<RawNode>, next: NonNull<RawNode>) {
+    const fn remove(prev: *const RawNode, node: *const RawNode, next: *const RawNode) {
         unsafe {
-            *prev.as_ref().next.get() = next;
-            *next.as_ref().prev.get() = prev;
+            *(*prev).next.get() = next;
+            *(*next).prev.get() = prev;
 
-            *node.as_ref().next.get() = node;
-            *node.as_ref().prev.get() = node;
+            *(*node).next.get() = node;
+            *(*node).prev.get() = node;
         }
     }
 }
@@ -79,8 +78,8 @@ mod test {
         use super::*;
         use core::pin::pin;
 
-        fn ptr(node: Pin<&RawNode>) -> NonNull<RawNode> {
-            NonNull::from(node.get_ref())
+        fn ptr(node: Pin<&RawNode>) -> *const RawNode {
+            ptr::from_ref(node.get_ref())
         }
 
         fn ready(node: Pin<&RawNode>) -> Pin<&RawNode> {
@@ -88,11 +87,11 @@ mod test {
             node
         }
 
-        fn prev(node: Pin<&RawNode>) -> NonNull<RawNode> {
+        fn prev(node: Pin<&RawNode>) -> *const RawNode {
             unsafe { *node.prev.get() }
         }
 
-        fn next(node: Pin<&RawNode>) -> NonNull<RawNode> {
+        fn next(node: Pin<&RawNode>) -> *const RawNode {
             unsafe { *node.next.get() }
         }
 
