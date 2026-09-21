@@ -80,6 +80,23 @@ where
     fn as_node(ptr: *const Self) -> *const Node<Self, R>;
 }
 
+#[macro_export]
+macro_rules! linked {
+    ($ty:ty, $role:ty, $field:ident) => {
+        unsafe impl $crate::Linked<$role> for $ty {
+            fn as_item(node: *const $crate::Node<Self, $role>) -> *const Self {
+                let offset = ::core::mem::offset_of!(Self, $field);
+
+                unsafe { node.byte_sub(offset).cast::<Self>() }
+            }
+
+            fn as_node(ptr: *const Self) -> *const $crate::Node<Self, $role> {
+                unsafe { &raw const (*ptr).$field }
+            }
+        }
+    };
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
