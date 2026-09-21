@@ -3,6 +3,8 @@
 // list.rs -- instrusive doubly linked list
 // Copyright (C) 2026  Jacob Koziej <jacobkoziej@gmail.com>
 
+#![allow(dead_code)]
+
 use core::cell::UnsafeCell;
 use core::marker::{PhantomData, PhantomPinned};
 use core::pin::Pin;
