@@ -72,6 +72,14 @@ pub struct Node<T, R: Role> {
     _marker: PhantomData<fn() -> (T, R)>,
 }
 
+pub unsafe trait Linked<R: Role>
+where
+    Self: Sized,
+{
+    fn as_item(node: *const Node<Self, R>) -> *const Self;
+    fn as_node(ptr: *const Self) -> *const Node<Self, R>;
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
