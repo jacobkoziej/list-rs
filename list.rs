@@ -88,6 +88,9 @@ where
     }
 }
 
+unsafe impl<T, R: Role> Send for Node<T, R> {}
+unsafe impl<T, R: Role> Sync for Node<T, R> {}
+
 pub unsafe trait Linked<R: Role>
 where
     Self: Sized,
@@ -206,6 +209,11 @@ mod test {
 
     linked! {Item, Foo, foo}
     linked! {Item, Bar, bar}
+
+    const _: () = {
+        fn check<T: Send + Sync>() {}
+        let _ = check::<Node<Item, Foo>>;
+    };
 
     mod raw_node {
         use super::*;
