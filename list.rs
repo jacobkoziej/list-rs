@@ -88,6 +88,18 @@ where
     }
 }
 
+impl<T, R> Deref for Node<T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*Self::Target::as_item(ptr::from_ref(self)) }
+    }
+}
+
 unsafe impl<T, R: Role> Send for Node<T, R> {}
 unsafe impl<T, R: Role> Sync for Node<T, R> {}
 
