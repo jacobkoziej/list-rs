@@ -50,8 +50,8 @@ impl RawNode {
 
     const fn new() -> Self {
         Self {
-            prev: UnsafeCell::new(ptr::null_mut()),
-            next: UnsafeCell::new(ptr::null_mut()),
+            prev: UnsafeCell::new(ptr::null()),
+            next: UnsafeCell::new(ptr::null()),
             _pin: PhantomPinned,
         }
     }
