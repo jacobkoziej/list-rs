@@ -27,7 +27,7 @@ impl RawNode {
         }
     }
 
-    fn insert(prev: NonNull<RawNode>, node: NonNull<RawNode>, next: NonNull<RawNode>) {
+    const fn insert(prev: NonNull<RawNode>, node: NonNull<RawNode>, next: NonNull<RawNode>) {
         unsafe {
             *prev.as_ref().next.get() = node;
             *node.as_ref().prev.get() = prev;
@@ -44,7 +44,7 @@ impl RawNode {
         *prev == ptr && *next == ptr
     }
 
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             prev: UnsafeCell::new(NonNull::dangling()),
             next: UnsafeCell::new(NonNull::dangling()),
@@ -52,7 +52,7 @@ impl RawNode {
         }
     }
 
-    fn remove(prev: NonNull<RawNode>, node: NonNull<RawNode>, next: NonNull<RawNode>) {
+    const fn remove(prev: NonNull<RawNode>, node: NonNull<RawNode>, next: NonNull<RawNode>) {
         unsafe {
             *prev.as_ref().next.get() = next;
             *next.as_ref().prev.get() = prev;
