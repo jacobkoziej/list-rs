@@ -53,6 +53,14 @@ impl RawNode {
         }
     }
 
+    const fn next(ptr: *const Self) -> *const Self {
+        unsafe { *(*ptr).next.get() }
+    }
+
+    const fn prev(ptr: *const Self) -> *const Self {
+        unsafe { *(*ptr).prev.get() }
+    }
+
     const fn remove(prev: *const Self, node: *const Self, next: *const Self) {
         unsafe {
             *(*prev).next.get() = next;
