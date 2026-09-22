@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 use core::cell::UnsafeCell;
+use core::iter::{DoubleEndedIterator, FusedIterator, IntoIterator, Iterator};
 use core::marker::{PhantomData, PhantomPinned};
 use core::mem::{ManuallyDrop, offset_of};
 use core::ops::{Deref, Drop};
@@ -69,6 +70,78 @@ impl RawNode {
             *(*node).next.get() = ptr::null();
             *(*node).prev.get() = ptr::null();
         }
+    }
+}
+
+impl IntoIterator for &RawNode {
+    type Item = *const RawNode;
+    type IntoIter = RawIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Self::IntoIter::new(ptr::from_ref(self))
+    }
+}
+
+struct RawIter {
+    front: *const RawNode,
+    back: *const RawNode,
+}
+
+impl RawIter {
+    const fn new(node: *const RawNode) -> Self {
+        if node.is_null() {
+            return Self {
+                front: ptr::null(),
+                back: ptr::null(),
+            };
+        }
+
+        Self {
+            front: node,
+            back: RawNode::prev(node),
+        }
+    }
+}
+
+impl DoubleEndedIterator for RawIter {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.back.is_null() {
+            return None;
+        }
+
+        let node = self.back;
+
+        if self.front == self.back {
+            self.front = ptr::null();
+            self.back = ptr::null();
+        } else {
+            self.back = RawNode::prev(self.back);
+        }
+
+        Some(node)
+    }
+}
+
+impl FusedIterator for RawIter {}
+
+impl Iterator for RawIter {
+    type Item = *const RawNode;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.front.is_null() {
+            return None;
+        }
+
+        let node = self.front;
+
+        if self.front == self.back {
+            self.front = ptr::null();
+            self.back = ptr::null();
+        } else {
+            self.front = RawNode::next(self.front);
+        }
+
+        Some(node)
     }
 }
 
@@ -327,6 +400,7 @@ unsafe impl<T: Linked<R>, R: Role> Send for List<T, R> {}
 #[cfg(test)]
 mod test {
     use super::*;
+    use core::pin::{Pin, pin};
 
     struct Foo;
     impl Role for Foo {}
@@ -358,13 +432,13 @@ mod test {
         let _ = check::<Node<Item, Foo>>;
     };
 
+    fn ptr(node: Pin<&RawNode>) -> *const RawNode {
+        ptr::from_ref(node.get_ref())
+    }
+
     mod raw_node {
         use super::*;
         use core::pin::{Pin, pin};
-
-        fn ptr(node: Pin<&RawNode>) -> *const RawNode {
-            ptr::from_ref(node.get_ref())
-        }
 
         fn prev(node: Pin<&RawNode>) -> *const RawNode {
             unsafe { *node.prev.get() }
@@ -376,12 +450,12 @@ mod test {
 
         fn assert_ring(nodes: &[Pin<&RawNode>]) {
             let n = nodes.len();
+            let expected: Vec<_> = nodes.iter().map(|node| ptr(*node)).collect();
+
+            assert!(RawIter::new(expected[0]).eq(expected.iter().copied()));
 
             for i in 0..n {
-                let next = ptr(nodes[(i + 1) % n]);
                 let prev = ptr(nodes[(i + n - 1) % n]);
-
-                assert_eq!(self::next(nodes[i]), next);
                 assert_eq!(self::prev(nodes[i]), prev);
             }
         }
@@ -448,6 +522,115 @@ mod test {
             RawNode::remove(ptr(b), ptr(b), ptr(b));
 
             assert!(b.is_null());
+        }
+    }
+
+    mod raw_iter {
+        use super::*;
+
+        #[test]
+        fn empty() {
+            let mut iter = RawIter::new(ptr::null());
+
+            assert_eq!(iter.next(), None);
+            assert_eq!(iter.next_back(), None);
+            assert_eq!(iter.next(), None);
+            assert_eq!(iter.next_back(), None);
+        }
+
+        #[test]
+        fn unlinked() {
+            let node = pin!(RawNode::new());
+            let node = node.into_ref();
+
+            let mut iter = RawIter::new(ptr(node));
+
+            assert_eq!(iter.next(), Some(ptr(node)));
+            assert_eq!(iter.next(), None);
+            assert_eq!(iter.next_back(), None);
+        }
+
+        #[test]
+        fn singleton() {
+            let node = pin!(RawNode::new());
+            let node = node.into_ref();
+
+            RawNode::insert(ptr(node), ptr(node), ptr(node));
+
+            let mut iter = RawIter::new(ptr(node));
+
+            assert_eq!(iter.next(), Some(ptr(node)));
+            assert_eq!(iter.next(), None);
+            assert_eq!(iter.next_back(), None);
+
+            let mut iter = RawIter::new(ptr(node));
+
+            assert_eq!(iter.next_back(), Some(ptr(node)));
+            assert_eq!(iter.next_back(), None);
+            assert_eq!(iter.next(), None);
+        }
+
+        #[test]
+        fn forward_three() {
+            let a = pin!(RawNode::new());
+            let a = a.into_ref();
+            let b = pin!(RawNode::new());
+            let b = b.into_ref();
+            let c = pin!(RawNode::new());
+            let c = c.into_ref();
+
+            RawNode::insert(ptr(b), ptr(a), ptr(b));
+            RawNode::insert(ptr(b), ptr(c), ptr(a));
+
+            assert!(RawIter::new(ptr(a)).eq([ptr(a), ptr(b), ptr(c)]));
+        }
+
+        #[test]
+        fn into_iter_matches_new() {
+            let a = pin!(RawNode::new());
+            let a = a.into_ref();
+            let b = pin!(RawNode::new());
+            let b = b.into_ref();
+
+            RawNode::insert(ptr(b), ptr(a), ptr(b));
+
+            assert!(a.get_ref().into_iter().eq(RawIter::new(ptr(a))));
+        }
+
+        #[test]
+        fn rev_three() {
+            let a = pin!(RawNode::new());
+            let a = a.into_ref();
+            let b = pin!(RawNode::new());
+            let b = b.into_ref();
+            let c = pin!(RawNode::new());
+            let c = c.into_ref();
+
+            RawNode::insert(ptr(b), ptr(a), ptr(b));
+            RawNode::insert(ptr(b), ptr(c), ptr(a));
+
+            assert!(RawIter::new(ptr(a)).rev().eq([ptr(c), ptr(b), ptr(a)]));
+        }
+
+        #[test]
+        fn both_ends_three() {
+            let a = pin!(RawNode::new());
+            let a = a.into_ref();
+            let b = pin!(RawNode::new());
+            let b = b.into_ref();
+            let c = pin!(RawNode::new());
+            let c = c.into_ref();
+
+            RawNode::insert(ptr(b), ptr(a), ptr(b));
+            RawNode::insert(ptr(b), ptr(c), ptr(a));
+
+            let mut iter = RawIter::new(ptr(a));
+
+            assert_eq!(iter.next(), Some(ptr(a)));
+            assert_eq!(iter.next_back(), Some(ptr(c)));
+            assert_eq!(iter.next(), Some(ptr(b)));
+            assert_eq!(iter.next(), None);
+            assert_eq!(iter.next_back(), None);
         }
     }
 
