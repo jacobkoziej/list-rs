@@ -9,7 +9,6 @@ use core::cell::UnsafeCell;
 use core::marker::{PhantomData, PhantomPinned};
 use core::mem::ManuallyDrop;
 use core::ops::{Deref, Drop};
-use core::pin::Pin;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -21,15 +20,6 @@ struct RawNode {
 }
 
 impl RawNode {
-    fn init(self: Pin<&Self>) {
-        let ptr = ptr::from_ref(self.get_ref());
-
-        unsafe {
-            *self.as_ref().prev.get() = ptr;
-            *self.as_ref().next.get() = ptr;
-        }
-    }
-
     const fn insert(prev: *const RawNode, node: *const RawNode, next: *const RawNode) {
         unsafe {
             *(*prev).next.get() = node;
@@ -37,6 +27,13 @@ impl RawNode {
             *(*node).next.get() = next;
             *(*next).prev.get() = node;
         }
+    }
+
+    const fn is_null(&self) -> bool {
+        let prev = unsafe { &*self.prev.get() };
+        let next = unsafe { &*self.next.get() };
+
+        prev.is_null() && next.is_null()
     }
 
     fn is_singleton(&self) -> bool {
@@ -61,8 +58,8 @@ impl RawNode {
             *(*prev).next.get() = next;
             *(*next).prev.get() = prev;
 
-            *(*node).next.get() = node;
-            *(*node).prev.get() = node;
+            *(*node).next.get() = ptr::null();
+            *(*node).prev.get() = ptr::null();
         }
     }
 }
@@ -229,15 +226,10 @@ mod test {
 
     mod raw_node {
         use super::*;
-        use core::pin::pin;
+        use core::pin::{Pin, pin};
 
         fn ptr(node: Pin<&RawNode>) -> *const RawNode {
             ptr::from_ref(node.get_ref())
-        }
-
-        fn ready(node: Pin<&RawNode>) -> Pin<&RawNode> {
-            node.init();
-            node
         }
 
         fn prev(node: Pin<&RawNode>) -> *const RawNode {
@@ -263,29 +255,36 @@ mod test {
         #[test]
         fn insert() {
             let a = pin!(RawNode::new());
+            let a = a.into_ref();
             let b = pin!(RawNode::new());
-
-            let a = ready(a.as_ref());
-            let b = ready(b.as_ref());
+            let b = b.into_ref();
 
             RawNode::insert(ptr(b), ptr(a), ptr(b));
             assert_ring(&[a, b]);
 
             let c = pin!(RawNode::new());
-
-            let c = ready(c.as_ref());
+            let c = c.into_ref();
 
             RawNode::insert(ptr(b), ptr(c), ptr(a));
             assert_ring(&[a, b, c]);
         }
 
         #[test]
+        fn if_null() {
+            let node = pin!(RawNode::new());
+            let node = node.into_ref();
+
+            assert!(node.is_null());
+        }
+
+        #[test]
         fn is_singleton() {
             let node = pin!(RawNode::new());
+            let node = node.into_ref();
 
             assert!(!node.is_singleton());
 
-            node.as_ref().init();
+            RawNode::insert(ptr(node), ptr(node), ptr(node));
 
             assert!(node.is_singleton());
         }
@@ -293,25 +292,28 @@ mod test {
         #[test]
         fn remove() {
             let a = pin!(RawNode::new());
+            let a = a.into_ref();
             let b = pin!(RawNode::new());
+            let b = b.into_ref();
             let c = pin!(RawNode::new());
-
-            let a = ready(a.as_ref());
-            let b = ready(b.as_ref());
-            let c = ready(c.as_ref());
+            let c = c.into_ref();
 
             RawNode::insert(ptr(b), ptr(a), ptr(b));
             RawNode::insert(ptr(b), ptr(c), ptr(a));
 
             RawNode::remove(ptr(b), ptr(c), ptr(a));
 
-            assert!(c.is_singleton());
+            assert!(c.is_null());
             assert_ring(&[a, b]);
 
             RawNode::remove(ptr(b), ptr(a), ptr(b));
 
-            assert!(a.is_singleton());
+            assert!(a.is_null());
             assert!(b.is_singleton());
+
+            RawNode::remove(ptr(b), ptr(b), ptr(b));
+
+            assert!(b.is_null());
         }
     }
 
