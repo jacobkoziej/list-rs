@@ -395,7 +395,73 @@ where
     }
 }
 
+impl<'a, T, R> IntoIterator for &'a List<T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    type Item = &'a T;
+    type IntoIter = Iter<'a, T, R>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Self::IntoIter::new(self)
+    }
+}
+
 unsafe impl<T: Linked<R>, R: Role> Send for List<T, R> {}
+
+pub struct Iter<'a, T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    list: &'a List<T, R>,
+    raw: RawIter,
+}
+
+impl<'a, T, R> Iter<'a, T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    pub fn new(list: &'a List<T, R>) -> Self {
+        Self {
+            list: list,
+            raw: RawIter::new(list.ptr),
+        }
+    }
+}
+impl<'a, T, R> DoubleEndedIterator for Iter<'a, T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let ptr = self.raw.next_back()?;
+
+        let node = unsafe { Node::<T, R>::from_raw(ptr) };
+
+        Some(unsafe { &*T::as_item(node) })
+    }
+}
+
+impl<'a, T: Linked<R>, R: Role> FusedIterator for Iter<'a, T, R> {}
+
+impl<'a, T, R> Iterator for Iter<'a, T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let ptr = self.raw.next()?;
+
+        let node = unsafe { Node::<T, R>::from_raw(ptr) };
+
+        Some(unsafe { &*T::as_item(node) })
+    }
+}
 
 #[cfg(test)]
 mod test {
