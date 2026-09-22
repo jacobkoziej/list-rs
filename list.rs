@@ -14,13 +14,13 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 struct RawNode {
-    prev: UnsafeCell<*const RawNode>,
-    next: UnsafeCell<*const RawNode>,
+    prev: UnsafeCell<*const Self>,
+    next: UnsafeCell<*const Self>,
     _pin: PhantomPinned,
 }
 
 impl RawNode {
-    const fn insert(prev: *const RawNode, node: *const RawNode, next: *const RawNode) {
+    const fn insert(prev: *const Self, node: *const Self, next: *const Self) {
         unsafe {
             *(*prev).next.get() = node;
             *(*node).prev.get() = prev;
@@ -53,7 +53,7 @@ impl RawNode {
         }
     }
 
-    const fn remove(prev: *const RawNode, node: *const RawNode, next: *const RawNode) {
+    const fn remove(prev: *const Self, node: *const Self, next: *const Self) {
         unsafe {
             *(*prev).next.get() = next;
             *(*next).prev.get() = prev;
