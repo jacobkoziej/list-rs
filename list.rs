@@ -7,7 +7,7 @@
 
 use core::cell::UnsafeCell;
 use core::marker::{PhantomData, PhantomPinned};
-use core::mem::ManuallyDrop;
+use core::mem::{ManuallyDrop, offset_of};
 use core::ops::{Deref, Drop};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -84,6 +84,16 @@ impl<T, R> Node<T, R>
 where
     R: Role,
 {
+    const fn as_raw(ptr: *const Self) -> *const RawNode {
+        unsafe { &raw const (*ptr).raw }
+    }
+
+    const unsafe fn from_raw(ptr: *const RawNode) -> *const Self {
+        let offset = offset_of!(Self, raw);
+
+        unsafe { ptr.byte_sub(offset).cast::<Self>() }
+    }
+
     pub unsafe fn new() -> Self {
         Self {
             raw: RawNode::new(),
