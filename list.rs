@@ -195,7 +195,7 @@ pub unsafe trait Linked<R: Role>
 where
     Self: Sized,
 {
-    fn as_item(node: *const Node<Self, R>) -> *const Self;
+    unsafe fn as_item(node: *const Node<Self, R>) -> *const Self;
     fn as_node(ptr: *const Self) -> *const Node<Self, R>;
 }
 
@@ -203,7 +203,7 @@ where
 macro_rules! linked {
     ($ty:ty, $role:ty, $field:ident) => {
         unsafe impl $crate::Linked<$role> for $ty {
-            fn as_item(node: *const $crate::Node<Self, $role>) -> *const Self {
+            unsafe fn as_item(node: *const $crate::Node<Self, $role>) -> *const Self {
                 let offset = ::core::mem::offset_of!(Self, $field);
 
                 unsafe { node.byte_sub(offset).cast::<Self>() }
@@ -313,7 +313,7 @@ where
 
     fn get_item(ptr: *const RawNode) -> Arc<T> {
         let node = unsafe { Node::<T, R>::from_raw(ptr) };
-        let item = T::as_item(node);
+        let item = unsafe { T::as_item(node) };
 
         let arc = ManuallyDrop::new(unsafe { Arc::from_raw(item) });
 
@@ -356,7 +356,7 @@ where
         RawNode::remove(RawNode::prev(tail), tail, head);
 
         let node = unsafe { Node::<T, R>::from_raw(tail) };
-        let item = T::as_item(node);
+        let item = unsafe { T::as_item(node) };
 
         Some(unsafe { ListArc::from_raw(item) })
     }
@@ -378,7 +378,7 @@ where
         RawNode::remove(tail, head, RawNode::next(head));
 
         let node = unsafe { Node::<T, R>::from_raw(head) };
-        let item = T::as_item(node);
+        let item = unsafe { T::as_item(node) };
 
         Some(unsafe { ListArc::from_raw(item) })
     }
