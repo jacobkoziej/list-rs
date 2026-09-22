@@ -208,6 +208,122 @@ where
     }
 }
 
+pub struct List<T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    ptr: *const RawNode,
+    _marker: PhantomData<fn() -> (T, R)>,
+}
+
+impl<T, R> List<T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    pub fn append(&mut self, arc: ListArc<T, R>) {
+        let node = Node::<T, R>::as_raw(T::as_node(arc.into_raw()));
+
+        if self.is_empty() {
+            RawNode::insert(node, node, node);
+            self.ptr = node;
+
+            return;
+        }
+
+        let head = self.ptr;
+        let tail = RawNode::prev(head);
+
+        RawNode::insert(tail, node, head);
+    }
+
+    fn get_item(ptr: *const RawNode) -> Arc<T> {
+        let node = unsafe { Node::<T, R>::from_raw(ptr) };
+        let item = T::as_item(node);
+
+        let arc = ManuallyDrop::new(unsafe { Arc::from_raw(item) });
+
+        Arc::clone(&arc)
+    }
+
+    pub fn head(&self) -> Option<Arc<T>> {
+        if self.is_empty() {
+            return None;
+        }
+
+        let head = self.ptr;
+
+        Some(Self::get_item(head))
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.ptr.is_null()
+    }
+
+    pub const fn new() -> Self {
+        Self {
+            ptr: ptr::null(),
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn pop_back(&mut self) -> Option<ListArc<T, R>> {
+        if self.is_empty() {
+            return None;
+        }
+
+        let head = self.ptr;
+        let tail = RawNode::prev(head);
+
+        if unsafe { &*head }.is_singleton() {
+            self.ptr = ptr::null();
+        }
+
+        RawNode::remove(RawNode::prev(tail), tail, head);
+
+        let node = unsafe { Node::<T, R>::from_raw(tail) };
+        let item = T::as_item(node);
+
+        Some(unsafe { ListArc::from_raw(item) })
+    }
+
+    pub fn pop_front(&mut self) -> Option<ListArc<T, R>> {
+        if self.is_empty() {
+            return None;
+        }
+
+        let head = self.ptr;
+        let tail = RawNode::prev(head);
+
+        if unsafe { &*head }.is_singleton() {
+            self.ptr = ptr::null();
+        } else {
+            self.ptr = RawNode::next(head);
+        }
+
+        RawNode::remove(tail, head, RawNode::next(head));
+
+        let node = unsafe { Node::<T, R>::from_raw(head) };
+        let item = T::as_item(node);
+
+        Some(unsafe { ListArc::from_raw(item) })
+    }
+
+    pub fn tail(&self) -> Option<Arc<T>> {
+        if self.is_empty() {
+            return None;
+        }
+
+        let head = self.ptr;
+        let tail = RawNode::prev(head);
+
+        Some(Self::get_item(tail))
+    }
+}
+
+unsafe impl<T: Linked<R>, R: Role> Send for List<T, R> {}
+
 #[cfg(test)]
 mod test {
     use super::*;
