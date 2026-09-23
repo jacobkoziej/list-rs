@@ -824,6 +824,16 @@ mod test {
 
     mod list_arc {
         use super::*;
+        use std::env;
+        use std::str::FromStr;
+        use std::thread;
+
+        fn env_read<T: FromStr>(name: &str, default: T) -> T {
+            env::var(name)
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(default)
+        }
 
         #[test]
         fn only_mints_for_unclaimed() {
@@ -876,6 +886,29 @@ mod test {
 
             assert_eq!(foo.data, 1);
             assert!(ptr::eq(arc.as_ref(), &*foo));
+        }
+
+        #[test]
+        fn multithreaded_minting() {
+            let threads = env_read::<usize>("LISTARC_THREADS", 8).max(1);
+            let iters = env_read::<usize>("LISTARC_ITERATIONS", 1_000);
+
+            let arc = Arc::new(Item::new(0));
+
+            thread::scope(|s| {
+                for _ in 0..threads {
+                    let arc = &arc;
+
+                    s.spawn(move || {
+                        for _ in 0..iters {
+                            drop(ListArc::<Item, Foo>::try_from_arc(arc));
+                        }
+                    });
+                }
+            });
+
+            assert_eq!(Arc::strong_count(&arc), 1);
+            assert!(ListArc::<_, Foo>::try_from_arc(&arc).is_some());
         }
     }
 }
