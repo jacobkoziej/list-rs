@@ -395,6 +395,19 @@ where
     }
 }
 
+impl<T, R> IntoIterator for List<T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    type Item = ListArc<T, R>;
+    type IntoIter = IntoIter<T, R>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Self::IntoIter::new(self)
+    }
+}
+
 impl<'a, T, R> IntoIterator for &'a List<T, R>
 where
     T: Linked<R>,
@@ -431,6 +444,7 @@ where
         }
     }
 }
+
 impl<'a, T, R> DoubleEndedIterator for Iter<'a, T, R>
 where
     T: Linked<R>,
@@ -460,6 +474,42 @@ where
         let node = unsafe { Node::<T, R>::from_raw(ptr) };
 
         Some(unsafe { &*T::as_item(node) })
+    }
+}
+
+pub struct IntoIter<T: Linked<R>, R: Role>(List<T, R>);
+
+impl<T, R> IntoIter<T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    pub fn new(list: List<T, R>) -> Self {
+        Self(list)
+    }
+}
+
+impl<T, R> DoubleEndedIterator for IntoIter<T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.0.pop_back()
+    }
+}
+
+impl<T: Linked<R>, R: Role> FusedIterator for IntoIter<T, R> {}
+
+impl<T, R> Iterator for IntoIter<T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    type Item = ListArc<T, R>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.pop_front()
     }
 }
 
