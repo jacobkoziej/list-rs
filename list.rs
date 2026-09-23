@@ -610,6 +610,11 @@ mod test {
         let _ = check::<Node<Item, Foo>>;
     };
 
+    const _: () = {
+        fn check<T: Send + Sync>() {}
+        let _ = check::<ListArc<Item, Foo>>;
+    };
+
     fn ptr(node: Pin<&RawNode>) -> *const RawNode {
         ptr::from_ref(node.get_ref())
     }
