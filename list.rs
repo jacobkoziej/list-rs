@@ -405,6 +405,22 @@ where
     }
 }
 
+impl<T, R> FromIterator<ListArc<T, R>> for List<T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    fn from_iter<I: IntoIterator<Item = ListArc<T, R>>>(iter: I) -> Self {
+        let mut list = List::<T, R>::new();
+
+        for i in iter {
+            list.append(i)
+        }
+
+        list
+    }
+}
+
 impl<T, R> IntoIterator for List<T, R>
 where
     T: Linked<R>,
