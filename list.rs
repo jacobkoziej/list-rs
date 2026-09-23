@@ -395,6 +395,16 @@ where
     }
 }
 
+impl<T, R> Drop for List<T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    fn drop(&mut self) {
+        while self.pop_front().is_some() {}
+    }
+}
+
 impl<T, R> IntoIterator for List<T, R>
 where
     T: Linked<R>,
