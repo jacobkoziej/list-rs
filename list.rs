@@ -6,7 +6,9 @@
 #![allow(dead_code)]
 
 use core::cell::UnsafeCell;
-use core::iter::{DoubleEndedIterator, FusedIterator, IntoIterator, Iterator};
+use core::iter::{
+    DoubleEndedIterator, ExactSizeIterator, FromIterator, FusedIterator, IntoIterator, Iterator,
+};
 use core::marker::{PhantomData, PhantomPinned};
 use core::mem::{ManuallyDrop, offset_of};
 use core::ops::{Deref, Drop};
@@ -287,6 +289,7 @@ where
     R: Role,
 {
     ptr: *const RawNode,
+    len: usize,
     _marker: PhantomData<fn() -> (T, R)>,
 }
 
@@ -300,7 +303,9 @@ where
 
         if self.is_empty() {
             RawNode::insert(node, node, node);
+
             self.ptr = node;
+            self.len += 1;
 
             return;
         }
@@ -309,6 +314,8 @@ where
         let tail = RawNode::prev(head);
 
         RawNode::insert(tail, node, head);
+
+        self.len += 1;
     }
 
     fn get_item(ptr: *const RawNode) -> Arc<T> {
@@ -334,9 +341,14 @@ where
         self.ptr.is_null()
     }
 
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
     pub const fn new() -> Self {
         Self {
             ptr: ptr::null(),
+            len: 0,
             _marker: PhantomData,
         }
     }
@@ -354,6 +366,8 @@ where
         }
 
         RawNode::remove(RawNode::prev(tail), tail, head);
+
+        self.len -= 1;
 
         let node = unsafe { Node::<T, R>::from_raw(tail) };
         let item = unsafe { T::as_item(node) };
@@ -376,6 +390,8 @@ where
         }
 
         RawNode::remove(tail, head, RawNode::next(head));
+
+        self.len -= 1;
 
         let node = unsafe { Node::<T, R>::from_raw(head) };
         let item = unsafe { T::as_item(node) };
@@ -485,6 +501,16 @@ where
     }
 }
 
+impl<'a, T, R> ExactSizeIterator for Iter<'a, T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    fn len(&self) -> usize {
+        self.list.len()
+    }
+}
+
 impl<'a, T: Linked<R>, R: Role> FusedIterator for Iter<'a, T, R> {}
 
 impl<'a, T, R> Iterator for Iter<'a, T, R>
@@ -522,6 +548,16 @@ where
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.0.pop_back()
+    }
+}
+
+impl<T, R> ExactSizeIterator for IntoIter<T, R>
+where
+    T: Linked<R>,
+    R: Role,
+{
+    fn len(&self) -> usize {
+        self.0.len()
     }
 }
 
