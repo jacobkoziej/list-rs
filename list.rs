@@ -615,6 +615,11 @@ mod test {
         let _ = check::<ListArc<Item, Foo>>;
     };
 
+    const _: () = {
+        fn check<T: Send>() {}
+        let _ = check::<List<Item, Foo>>;
+    };
+
     fn ptr(node: Pin<&RawNode>) -> *const RawNode {
         ptr::from_ref(node.get_ref())
     }
