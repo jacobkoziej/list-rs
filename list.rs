@@ -911,4 +911,45 @@ mod test {
             assert!(ListArc::<_, Foo>::try_from_arc(&arc).is_some());
         }
     }
+
+    mod iter {
+        use super::*;
+
+        fn token(data: u32) -> ListArc<Item, Foo> {
+            ListArc::try_from_arc(&Arc::new(Item::new(data))).unwrap()
+        }
+
+        #[test]
+        fn iter_round_trip() {
+            let src = [0, 1, 2];
+
+            let list: List<Item, Foo> = src.into_iter().map(token).collect();
+
+            assert!((&list).into_iter().map(|item| item.data).eq(src));
+            assert!(
+                (&list)
+                    .into_iter()
+                    .rev()
+                    .map(|item| item.data)
+                    .eq(src.into_iter().rev())
+            );
+        }
+
+        #[test]
+        fn into_iter_round_trip() {
+            let src = [0, 1, 2];
+
+            let forward: List<Item, Foo> = src.into_iter().map(token).collect();
+            let reverse: List<Item, Foo> = src.into_iter().map(token).collect();
+
+            assert!(forward.into_iter().map(|item| item.data).eq(src));
+            assert!(
+                reverse
+                    .into_iter()
+                    .rev()
+                    .map(|item| item.data)
+                    .eq(src.into_iter().rev())
+            );
+        }
+    }
 }
