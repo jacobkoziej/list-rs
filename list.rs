@@ -379,6 +379,22 @@ where
         Some(unsafe { ListArc::from_raw(item) })
     }
 
+    pub fn push_front(&mut self, arc: ListArc<T, R>) {
+        let node = Node::<T, R>::as_raw(T::as_node(arc.into_raw()));
+
+        if self.is_empty() {
+            RawNode::insert(node, node, node);
+        } else {
+            let head = self.ptr;
+            let tail = RawNode::prev(head);
+
+            RawNode::insert(tail, node, head);
+        }
+
+        self.ptr = node;
+        self.len += 1;
+    }
+
     pub fn push_back(&mut self, arc: ListArc<T, R>) {
         let node = Node::<T, R>::as_raw(T::as_node(arc.into_raw()));
 
