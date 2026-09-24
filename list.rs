@@ -298,26 +298,6 @@ where
     T: Linked<R>,
     R: Role,
 {
-    pub fn append(&mut self, arc: ListArc<T, R>) {
-        let node = Node::<T, R>::as_raw(T::as_node(arc.into_raw()));
-
-        if self.is_empty() {
-            RawNode::insert(node, node, node);
-
-            self.ptr = node;
-            self.len += 1;
-
-            return;
-        }
-
-        let head = self.ptr;
-        let tail = RawNode::prev(head);
-
-        RawNode::insert(tail, node, head);
-
-        self.len += 1;
-    }
-
     fn get_item(ptr: *const RawNode) -> Arc<T> {
         let node = unsafe { Node::<T, R>::from_raw(ptr) };
         let item = unsafe { T::as_item(node) };
@@ -399,6 +379,26 @@ where
         Some(unsafe { ListArc::from_raw(item) })
     }
 
+    pub fn push_back(&mut self, arc: ListArc<T, R>) {
+        let node = Node::<T, R>::as_raw(T::as_node(arc.into_raw()));
+
+        if self.is_empty() {
+            RawNode::insert(node, node, node);
+
+            self.ptr = node;
+            self.len += 1;
+
+            return;
+        }
+
+        let head = self.ptr;
+        let tail = RawNode::prev(head);
+
+        RawNode::insert(tail, node, head);
+
+        self.len += 1;
+    }
+
     pub fn tail(&self) -> Option<Arc<T>> {
         if self.is_empty() {
             return None;
@@ -430,7 +430,7 @@ where
         let mut list = List::<T, R>::new();
 
         for i in iter {
-            list.append(i)
+            list.push_back(i)
         }
 
         list
