@@ -640,6 +640,10 @@ mod test {
         ptr::from_ref(node.get_ref())
     }
 
+    fn token(data: u32) -> ListArc<Item, Foo> {
+        ListArc::try_from_arc(&Arc::new(Item::new(data))).unwrap()
+    }
+
     mod raw_node {
         use super::*;
         use core::pin::{Pin, pin};
@@ -928,12 +932,64 @@ mod test {
         }
     }
 
-    mod iter {
+    mod list {
         use super::*;
 
-        fn token(data: u32) -> ListArc<Item, Foo> {
-            ListArc::try_from_arc(&Arc::new(Item::new(data))).unwrap()
+        #[test]
+        fn empty() {
+            let mut list = List::<Item, Foo>::new();
+
+            assert!(list.is_empty());
+            assert_eq!(list.len(), 0);
+            assert!(list.head().is_none());
+            assert!(list.tail().is_none());
+            assert!(list.pop_front().is_none());
+            assert!(list.pop_back().is_none());
         }
+
+        #[test]
+        fn push_pop_front() {
+            let mut list = List::new();
+
+            for data in [0, 1, 2] {
+                list.push_front(token(data));
+            }
+
+            assert!(!list.is_empty());
+            assert_eq!(list.len(), 3);
+
+            assert_eq!(list.head().unwrap().data, 2);
+            assert_eq!(list.tail().unwrap().data, 0);
+
+            assert_eq!(list.pop_front().unwrap().data, 2);
+
+            assert_eq!(list.head().unwrap().data, 1);
+            assert_eq!(list.tail().unwrap().data, 0);
+        }
+
+        #[test]
+        fn push_pop_back() {
+            let mut list = List::new();
+
+            for data in [0, 1, 2] {
+                list.push_back(token(data));
+            }
+
+            assert!(!list.is_empty());
+            assert_eq!(list.len(), 3);
+
+            assert_eq!(list.head().unwrap().data, 0);
+            assert_eq!(list.tail().unwrap().data, 2);
+
+            assert_eq!(list.pop_back().unwrap().data, 2);
+
+            assert_eq!(list.head().unwrap().data, 0);
+            assert_eq!(list.tail().unwrap().data, 1);
+        }
+    }
+
+    mod iter {
+        use super::*;
 
         #[test]
         fn iter_round_trip() {
