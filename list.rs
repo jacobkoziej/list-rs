@@ -527,6 +527,7 @@ where
     A: AllocatorClone,
 {
     list: &'a List<T, R, A>,
+    len: usize,
     raw: RawIter,
 }
 
@@ -539,6 +540,7 @@ where
     pub fn new(list: &'a List<T, R, A>) -> Self {
         Self {
             list: list,
+            len: list.len(),
             raw: RawIter::new(list.ptr),
         }
     }
@@ -553,6 +555,8 @@ where
     fn next_back(&mut self) -> Option<Self::Item> {
         let ptr = self.raw.next_back()?;
 
+        self.len -= 1;
+
         let node = unsafe { Node::<T, R>::from_raw(ptr) };
 
         Some(unsafe { &*T::as_item(node) })
@@ -566,7 +570,7 @@ where
     A: AllocatorClone,
 {
     fn len(&self) -> usize {
-        self.list.len()
+        self.len
     }
 }
 
@@ -588,6 +592,8 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         let ptr = self.raw.next()?;
+
+        self.len -= 1;
 
         let node = unsafe { Node::<T, R>::from_raw(ptr) };
 
@@ -1086,6 +1092,56 @@ mod test {
                     .map(|item| item.data)
                     .eq(src.into_iter().rev())
             );
+        }
+
+        #[test]
+        fn iter_exact_size() {
+            let list = List::<Item, Foo>::new();
+            let mut iter = (&list).into_iter();
+
+            assert_eq!(iter.len(), 0);
+            assert!(iter.next().is_none());
+            assert!(iter.next_back().is_none());
+            assert_eq!(iter.len(), 0);
+
+            let list: List<Item, Foo> = [0, 1, 2].into_iter().map(token).collect();
+            let mut iter = (&list).into_iter();
+
+            assert_eq!(iter.len(), 3);
+            assert_eq!(iter.next().unwrap().data, 0);
+            assert_eq!(iter.len(), 2);
+            assert_eq!(iter.next_back().unwrap().data, 2);
+            assert_eq!(iter.len(), 1);
+            assert_eq!(iter.next().unwrap().data, 1);
+            assert_eq!(iter.len(), 0);
+            assert!(iter.next().is_none());
+            assert!(iter.next_back().is_none());
+            assert_eq!(iter.len(), 0);
+        }
+
+        #[test]
+        fn into_iter_exact_size() {
+            let list = List::<Item, Foo>::new();
+            let mut iter = list.into_iter();
+
+            assert_eq!(iter.len(), 0);
+            assert!(iter.next().is_none());
+            assert!(iter.next_back().is_none());
+            assert_eq!(iter.len(), 0);
+
+            let list: List<Item, Foo> = [0, 1, 2].into_iter().map(token).collect();
+            let mut iter = list.into_iter();
+
+            assert_eq!(iter.len(), 3);
+            assert_eq!(iter.next().unwrap().data, 0);
+            assert_eq!(iter.len(), 2);
+            assert_eq!(iter.next_back().unwrap().data, 2);
+            assert_eq!(iter.len(), 1);
+            assert_eq!(iter.next().unwrap().data, 1);
+            assert_eq!(iter.len(), 0);
+            assert!(iter.next().is_none());
+            assert!(iter.next_back().is_none());
+            assert_eq!(iter.len(), 0);
         }
     }
 }
