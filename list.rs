@@ -3,8 +3,10 @@
 // list.rs -- instrusive doubly linked list
 // Copyright (C) 2026  Jacob Koziej <jacobkoziej@gmail.com>
 
+#![feature(allocator_api)]
 #![allow(dead_code)]
 
+use core::alloc::Allocator;
 use core::cell::UnsafeCell;
 use core::iter::{
     DoubleEndedIterator, ExactSizeIterator, FromIterator, FusedIterator, IntoIterator, Iterator,
@@ -14,6 +16,7 @@ use core::mem::{ManuallyDrop, offset_of};
 use core::ops::{Deref, Drop};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
+use std::alloc::{AllocatorClone, Global};
 use std::sync::Arc;
 
 struct RawNode {
@@ -218,34 +221,45 @@ macro_rules! linked {
     };
 }
 
-pub struct ListArc<T, R>
+pub struct ListArc<T, R, A = Global>
 where
     T: Linked<R>,
     R: Role,
+    A: Allocator,
 {
-    arc: Arc<T>,
+    arc: Arc<T, A>,
     _marker: PhantomData<fn() -> R>,
 }
 
-impl<T, R> ListArc<T, R>
+impl<T, R, A> ListArc<T, R, A>
 where
     T: Linked<R>,
     R: Role,
+    A: Allocator,
 {
-    unsafe fn from_raw(ptr: *const T) -> Self {
+    unsafe fn from_raw_in(ptr: *const T, alloc: A) -> Self {
         Self {
-            arc: unsafe { Arc::from_raw(ptr) },
+            arc: unsafe { Arc::from_raw_in(ptr, alloc) },
             _marker: PhantomData,
         }
     }
 
     fn into_raw(self) -> *const T {
         let this = ManuallyDrop::new(self);
+        let arc = unsafe { ptr::read(&this.arc) };
+        let (ptr, _alloc) = Arc::into_raw_with_allocator(arc);
 
-        Arc::as_ptr(&this.arc)
+        ptr
     }
+}
 
-    pub fn try_from_arc(arc: &Arc<T>) -> Option<Self> {
+impl<T, R, A> ListArc<T, R, A>
+where
+    T: Linked<R>,
+    R: Role,
+    A: AllocatorClone,
+{
+    pub fn try_from_arc(arc: &Arc<T, A>) -> Option<Self> {
         let node: &Node<T, R> = unsafe { &*T::as_node(&**arc) };
 
         node.claimed
@@ -259,10 +273,11 @@ where
     }
 }
 
-impl<T, R> Deref for ListArc<T, R>
+impl<T, R, A> Deref for ListArc<T, R, A>
 where
     T: Linked<R>,
     R: Role,
+    A: Allocator,
 {
     type Target = T;
 
@@ -271,10 +286,11 @@ where
     }
 }
 
-impl<T, R> Drop for ListArc<T, R>
+impl<T, R, A> Drop for ListArc<T, R, A>
 where
     T: Linked<R>,
     R: Role,
+    A: Allocator,
 {
     fn drop(&mut self) {
         let node: &Node<T, R> = unsafe { &*T::as_node(&*self.arc) };
@@ -283,13 +299,15 @@ where
     }
 }
 
-pub struct List<T, R>
+pub struct List<T, R, A = Global>
 where
     T: Linked<R>,
     R: Role,
+    A: AllocatorClone,
 {
     ptr: *const RawNode,
     len: usize,
+    alloc: A,
     _marker: PhantomData<fn() -> (T, R)>,
 }
 
@@ -298,23 +316,34 @@ where
     T: Linked<R>,
     R: Role,
 {
-    fn get_item(ptr: *const RawNode) -> Arc<T> {
+    pub const fn new() -> Self {
+        Self::new_in(Global)
+    }
+}
+
+impl<T, R, A> List<T, R, A>
+where
+    T: Linked<R>,
+    R: Role,
+    A: AllocatorClone,
+{
+    fn get_item(&self, ptr: *const RawNode) -> Arc<T, A> {
         let node = unsafe { Node::<T, R>::from_raw(ptr) };
         let item = unsafe { T::as_item(node) };
 
-        let arc = ManuallyDrop::new(unsafe { Arc::from_raw(item) });
+        let arc = ManuallyDrop::new(unsafe { Arc::from_raw_in(item, self.alloc.clone()) });
 
         Arc::clone(&arc)
     }
 
-    pub fn head(&self) -> Option<Arc<T>> {
+    pub fn head(&self) -> Option<Arc<T, A>> {
         if self.is_empty() {
             return None;
         }
 
         let head = self.ptr;
 
-        Some(Self::get_item(head))
+        Some(self.get_item(head))
     }
 
     pub const fn is_empty(&self) -> bool {
@@ -325,15 +354,16 @@ where
         self.len
     }
 
-    pub const fn new() -> Self {
+    pub const fn new_in(alloc: A) -> Self {
         Self {
             ptr: ptr::null(),
             len: 0,
+            alloc,
             _marker: PhantomData,
         }
     }
 
-    pub fn pop_back(&mut self) -> Option<ListArc<T, R>> {
+    pub fn pop_back(&mut self) -> Option<ListArc<T, R, A>> {
         if self.is_empty() {
             return None;
         }
@@ -352,10 +382,10 @@ where
         let node = unsafe { Node::<T, R>::from_raw(tail) };
         let item = unsafe { T::as_item(node) };
 
-        Some(unsafe { ListArc::from_raw(item) })
+        Some(unsafe { ListArc::from_raw_in(item, self.alloc.clone()) })
     }
 
-    pub fn pop_front(&mut self) -> Option<ListArc<T, R>> {
+    pub fn pop_front(&mut self) -> Option<ListArc<T, R, A>> {
         if self.is_empty() {
             return None;
         }
@@ -376,10 +406,10 @@ where
         let node = unsafe { Node::<T, R>::from_raw(head) };
         let item = unsafe { T::as_item(node) };
 
-        Some(unsafe { ListArc::from_raw(item) })
+        Some(unsafe { ListArc::from_raw_in(item, self.alloc.clone()) })
     }
 
-    pub fn push_front(&mut self, arc: ListArc<T, R>) {
+    pub fn push_front(&mut self, arc: ListArc<T, R, A>) {
         let node = Node::<T, R>::as_raw(T::as_node(arc.into_raw()));
 
         if self.is_empty() {
@@ -395,7 +425,7 @@ where
         self.len += 1;
     }
 
-    pub fn push_back(&mut self, arc: ListArc<T, R>) {
+    pub fn push_back(&mut self, arc: ListArc<T, R, A>) {
         let node = Node::<T, R>::as_raw(T::as_node(arc.into_raw()));
 
         if self.is_empty() {
@@ -415,7 +445,7 @@ where
         self.len += 1;
     }
 
-    pub fn tail(&self) -> Option<Arc<T>> {
+    pub fn tail(&self) -> Option<Arc<T, A>> {
         if self.is_empty() {
             return None;
         }
@@ -423,14 +453,15 @@ where
         let head = self.ptr;
         let tail = RawNode::prev(head);
 
-        Some(Self::get_item(tail))
+        Some(self.get_item(tail))
     }
 }
 
-impl<T, R> Drop for List<T, R>
+impl<T, R, A> Drop for List<T, R, A>
 where
     T: Linked<R>,
     R: Role,
+    A: AllocatorClone,
 {
     fn drop(&mut self) {
         while self.pop_front().is_some() {}
@@ -453,49 +484,59 @@ where
     }
 }
 
-impl<T, R> IntoIterator for List<T, R>
+impl<T, R, A> IntoIterator for List<T, R, A>
 where
     T: Linked<R>,
     R: Role,
+    A: AllocatorClone,
 {
-    type Item = ListArc<T, R>;
-    type IntoIter = IntoIter<T, R>;
+    type Item = ListArc<T, R, A>;
+    type IntoIter = IntoIter<T, R, A>;
 
     fn into_iter(self) -> Self::IntoIter {
         Self::IntoIter::new(self)
     }
 }
 
-impl<'a, T, R> IntoIterator for &'a List<T, R>
+impl<'a, T, R, A> IntoIterator for &'a List<T, R, A>
 where
     T: Linked<R>,
     R: Role,
+    A: AllocatorClone,
 {
     type Item = &'a T;
-    type IntoIter = Iter<'a, T, R>;
+    type IntoIter = Iter<'a, T, R, A>;
 
     fn into_iter(self) -> Self::IntoIter {
         Self::IntoIter::new(self)
     }
 }
 
-unsafe impl<T: Linked<R>, R: Role> Send for List<T, R> {}
-
-pub struct Iter<'a, T, R>
+unsafe impl<T, R, A> Send for List<T, R, A>
 where
     T: Linked<R>,
     R: Role,
+    A: AllocatorClone + Send,
 {
-    list: &'a List<T, R>,
+}
+
+pub struct Iter<'a, T, R, A = Global>
+where
+    T: Linked<R>,
+    R: Role,
+    A: AllocatorClone,
+{
+    list: &'a List<T, R, A>,
     raw: RawIter,
 }
 
-impl<'a, T, R> Iter<'a, T, R>
+impl<'a, T, R, A> Iter<'a, T, R, A>
 where
     T: Linked<R>,
     R: Role,
+    A: AllocatorClone,
 {
-    pub fn new(list: &'a List<T, R>) -> Self {
+    pub fn new(list: &'a List<T, R, A>) -> Self {
         Self {
             list: list,
             raw: RawIter::new(list.ptr),
@@ -503,10 +544,11 @@ where
     }
 }
 
-impl<'a, T, R> DoubleEndedIterator for Iter<'a, T, R>
+impl<'a, T, R, A> DoubleEndedIterator for Iter<'a, T, R, A>
 where
     T: Linked<R>,
     R: Role,
+    A: AllocatorClone,
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         let ptr = self.raw.next_back()?;
@@ -517,22 +559,30 @@ where
     }
 }
 
-impl<'a, T, R> ExactSizeIterator for Iter<'a, T, R>
+impl<'a, T, R, A> ExactSizeIterator for Iter<'a, T, R, A>
 where
     T: Linked<R>,
     R: Role,
+    A: AllocatorClone,
 {
     fn len(&self) -> usize {
         self.list.len()
     }
 }
 
-impl<'a, T: Linked<R>, R: Role> FusedIterator for Iter<'a, T, R> {}
-
-impl<'a, T, R> Iterator for Iter<'a, T, R>
+impl<'a, T, R, A> FusedIterator for Iter<'a, T, R, A>
 where
     T: Linked<R>,
     R: Role,
+    A: AllocatorClone,
+{
+}
+
+impl<'a, T, R, A> Iterator for Iter<'a, T, R, A>
+where
+    T: Linked<R>,
+    R: Role,
+    A: AllocatorClone,
 {
     type Item = &'a T;
 
@@ -545,46 +595,60 @@ where
     }
 }
 
-pub struct IntoIter<T: Linked<R>, R: Role>(List<T, R>);
-
-impl<T, R> IntoIter<T, R>
+pub struct IntoIter<T, R, A = Global>(List<T, R, A>)
 where
     T: Linked<R>,
     R: Role,
+    A: AllocatorClone;
+
+impl<T, R, A> IntoIter<T, R, A>
+where
+    T: Linked<R>,
+    R: Role,
+    A: AllocatorClone,
 {
-    pub fn new(list: List<T, R>) -> Self {
+    pub fn new(list: List<T, R, A>) -> Self {
         Self(list)
     }
 }
 
-impl<T, R> DoubleEndedIterator for IntoIter<T, R>
+impl<T, R, A> DoubleEndedIterator for IntoIter<T, R, A>
 where
     T: Linked<R>,
     R: Role,
+    A: AllocatorClone,
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         self.0.pop_back()
     }
 }
 
-impl<T, R> ExactSizeIterator for IntoIter<T, R>
+impl<T, R, A> ExactSizeIterator for IntoIter<T, R, A>
 where
     T: Linked<R>,
     R: Role,
+    A: AllocatorClone,
 {
     fn len(&self) -> usize {
         self.0.len()
     }
 }
 
-impl<T: Linked<R>, R: Role> FusedIterator for IntoIter<T, R> {}
-
-impl<T, R> Iterator for IntoIter<T, R>
+impl<T, R, A> FusedIterator for IntoIter<T, R, A>
 where
     T: Linked<R>,
     R: Role,
+    A: AllocatorClone,
 {
-    type Item = ListArc<T, R>;
+}
+
+impl<T, R, A> Iterator for IntoIter<T, R, A>
+where
+    T: Linked<R>,
+    R: Role,
+    A: AllocatorClone,
+{
+    type Item = ListArc<T, R, A>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.pop_front()
@@ -878,7 +942,7 @@ mod test {
             assert_eq!(Arc::strong_count(&arc), 2);
             assert!(ListArc::<_, Foo>::try_from_arc(&arc).is_none());
 
-            let foo = unsafe { ListArc::<_, Foo>::from_raw(ptr) };
+            let foo = unsafe { ListArc::<_, Foo>::from_raw_in(ptr, Global) };
 
             assert_eq!(Arc::strong_count(&arc), 2);
 
