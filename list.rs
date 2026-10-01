@@ -4,6 +4,7 @@
 // Copyright (C) 2026  Jacob Koziej <jacobkoziej@gmail.com>
 
 #![feature(allocator_api)]
+#![feature(const_atomic)]
 #![allow(dead_code)]
 
 use core::alloc::Allocator;
@@ -15,66 +16,87 @@ use core::marker::{PhantomData, PhantomPinned};
 use core::mem::{ManuallyDrop, offset_of};
 use core::ops::{Deref, Drop};
 use core::ptr;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicPtr, Ordering};
 use std::alloc::{AllocatorClone, Global};
 use std::sync::Arc;
 
 struct RawNode {
-    prev: UnsafeCell<*const Self>,
-    next: UnsafeCell<*const Self>,
+    prev: AtomicPtr<Self>,
+    next: AtomicPtr<Self>,
     _pin: PhantomPinned,
 }
 
 impl RawNode {
     const fn insert(prev: *const Self, node: *const Self, next: *const Self) {
         unsafe {
-            *(*prev).next.get() = node;
-            *(*node).prev.get() = prev;
-            *(*node).next.get() = next;
-            *(*next).prev.get() = node;
+            (*prev).next.store(node.cast_mut(), Ordering::Relaxed);
+            (*node).prev.store(prev.cast_mut(), Ordering::Relaxed);
+            (*node).next.store(next.cast_mut(), Ordering::Relaxed);
+            (*next).prev.store(node.cast_mut(), Ordering::Relaxed);
         }
     }
 
-    const fn is_null(&self) -> bool {
-        let prev = unsafe { &*self.prev.get() };
-        let next = unsafe { &*self.next.get() };
-
-        prev.is_null() && next.is_null()
-    }
-
     fn is_singleton(&self) -> bool {
-        let ptr = ptr::from_ref(self);
+        let ptr = ptr::from_ref(self).cast_mut();
+        let prev = self.prev.load(Ordering::Relaxed);
+        let next = self.next.load(Ordering::Relaxed);
 
-        let prev = unsafe { &*self.prev.get() };
-        let next = unsafe { &*self.next.get() };
-
-        *prev == ptr && *next == ptr
+        prev == ptr && next == ptr
     }
 
     const fn new() -> Self {
         Self {
-            prev: UnsafeCell::new(ptr::null()),
-            next: UnsafeCell::new(ptr::null()),
+            prev: AtomicPtr::new(ptr::null_mut()),
+            next: AtomicPtr::new(ptr::null_mut()),
             _pin: PhantomPinned,
         }
     }
 
     const fn next(ptr: *const Self) -> *const Self {
-        unsafe { *(*ptr).next.get() }
+        unsafe { (*ptr).next.load(Ordering::Relaxed).cast_const() }
     }
 
     const fn prev(ptr: *const Self) -> *const Self {
-        unsafe { *(*ptr).prev.get() }
+        unsafe { (*ptr).prev.load(Ordering::Relaxed).cast_const() }
+    }
+
+    const fn release(ptr: *const Self) {
+        unsafe {
+            (*ptr).prev.store(ptr::null_mut(), Ordering::Relaxed);
+            (*ptr).next.store(ptr::null_mut(), Ordering::Release);
+        }
     }
 
     const fn remove(prev: *const Self, node: *const Self, next: *const Self) {
         unsafe {
-            *(*prev).next.get() = next;
-            *(*next).prev.get() = prev;
+            (*prev).next.store(next.cast_mut(), Ordering::Relaxed);
+            (*next).prev.store(prev.cast_mut(), Ordering::Relaxed);
 
-            *(*node).next.get() = ptr::null();
-            *(*node).prev.get() = ptr::null();
+            (*node).prev.store(node.cast_mut(), Ordering::Relaxed);
+            (*node).next.store(node.cast_mut(), Ordering::Relaxed);
         }
+    }
+
+    fn try_claim(ptr: *const Self) -> bool {
+        let node = unsafe { &*ptr };
+
+        let claimed = node
+            .next
+            .compare_exchange(
+                ptr::null_mut(),
+                ptr.cast_mut(),
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+            .is_ok();
+
+        if !claimed {
+            return false;
+        }
+
+        node.prev.store(ptr.cast_mut(), Ordering::Relaxed);
+
+        true
     }
 }
 
@@ -154,7 +176,6 @@ pub trait Role {}
 
 pub struct Node<T, R: Role> {
     raw: RawNode,
-    claimed: AtomicBool,
     _marker: PhantomData<fn() -> (T, R)>,
 }
 
@@ -175,7 +196,6 @@ where
     pub unsafe fn new() -> Self {
         Self {
             raw: RawNode::new(),
-            claimed: AtomicBool::new(false),
             _marker: PhantomData,
         }
     }
@@ -260,11 +280,11 @@ where
     A: AllocatorClone,
 {
     pub fn try_from_arc(arc: &Arc<T, A>) -> Option<Self> {
-        let node: &Node<T, R> = unsafe { &*T::as_node(&**arc) };
+        let node = T::as_node(&**arc);
 
-        node.claimed
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .ok()?;
+        if !RawNode::try_claim(Node::<T, R>::as_raw(node)) {
+            return None;
+        }
 
         Some(Self {
             arc: Arc::clone(arc),
@@ -293,9 +313,9 @@ where
     A: Allocator,
 {
     fn drop(&mut self) {
-        let node: &Node<T, R> = unsafe { &*T::as_node(&*self.arc) };
+        let node = T::as_node(&*self.arc);
 
-        node.claimed.store(false, Ordering::Release);
+        RawNode::release(Node::<T, R>::as_raw(node));
     }
 }
 
@@ -719,11 +739,11 @@ mod test {
         use core::pin::{Pin, pin};
 
         fn prev(node: Pin<&RawNode>) -> *const RawNode {
-            unsafe { *node.prev.get() }
+            RawNode::prev(ptr(node))
         }
 
         fn next(node: Pin<&RawNode>) -> *const RawNode {
-            unsafe { *node.next.get() }
+            RawNode::next(ptr(node))
         }
 
         fn assert_ring(nodes: &[Pin<&RawNode>]) {
@@ -756,14 +776,6 @@ mod test {
         }
 
         #[test]
-        fn if_null() {
-            let node = pin!(RawNode::new());
-            let node = node.into_ref();
-
-            assert!(node.is_null());
-        }
-
-        #[test]
         fn is_singleton() {
             let node = pin!(RawNode::new());
             let node = node.into_ref();
@@ -789,17 +801,17 @@ mod test {
 
             RawNode::remove(ptr(b), ptr(c), ptr(a));
 
-            assert!(c.is_null());
+            assert!(c.is_singleton());
             assert_ring(&[a, b]);
 
             RawNode::remove(ptr(b), ptr(a), ptr(b));
 
-            assert!(a.is_null());
+            assert!(a.is_singleton());
             assert!(b.is_singleton());
 
             RawNode::remove(ptr(b), ptr(b), ptr(b));
 
-            assert!(b.is_null());
+            assert!(b.is_singleton());
         }
     }
 
