@@ -207,13 +207,13 @@ where
 unsafe impl<T, R: Role> Send for Node<T, R> {}
 unsafe impl<T, R: Role> Sync for Node<T, R> {}
 
-pub struct DTNode<T: ?Sized, R: Role> {
+pub struct DynNode<T: ?Sized, R: Role> {
     links: Links,
     item: UnsafeCell<MaybeUninit<*const T>>,
     _marker: PhantomData<(*const T, fn() -> R)>,
 }
 
-impl<T, R> DTNode<T, R>
+impl<T, R> DynNode<T, R>
 where
     T: ?Sized,
     R: Role,
@@ -259,7 +259,7 @@ macro_rules! linked {
 }
 
 pub unsafe trait DynLinked<R: Role> {
-    fn node(&self) -> *const DTNode<dyn DynLinked<R>, R>;
+    fn node(&self) -> *const DynNode<dyn DynLinked<R>, R>;
 }
 
 pub struct ListArc<T, R, A = Global>
