@@ -267,6 +267,10 @@ macro_rules! linked {
     };
 }
 
+pub unsafe trait DynLinked<R: Role> {
+    fn node(&self) -> *const DTNode<dyn DynLinked<R>, R>;
+}
+
 pub struct ListArc<T, R, A = Global>
 where
     T: Linked<R>,
