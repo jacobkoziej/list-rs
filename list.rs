@@ -13,7 +13,7 @@ use core::iter::{
     DoubleEndedIterator, ExactSizeIterator, FromIterator, FusedIterator, IntoIterator, Iterator,
 };
 use core::marker::{PhantomData, PhantomPinned};
-use core::mem::{ManuallyDrop, offset_of};
+use core::mem::{ManuallyDrop, MaybeUninit, offset_of};
 use core::ops::{Deref, Drop};
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
@@ -215,6 +215,32 @@ where
 
 unsafe impl<T, R: Role> Send for Node<T, R> {}
 unsafe impl<T, R: Role> Sync for Node<T, R> {}
+
+pub struct DTNode<T: ?Sized, R: Role> {
+    raw: RawNode,
+    item: UnsafeCell<MaybeUninit<*const T>>,
+    _marker: PhantomData<(*const T, fn() -> R)>,
+}
+
+impl<T, R> DTNode<T, R>
+where
+    T: ?Sized,
+    R: Role,
+{
+    fn as_raw(ptr: *const Self) -> *const RawNode {
+        unsafe { &raw const (*ptr).raw }
+    }
+
+    const unsafe fn from_raw(ptr: *const RawNode) -> *const Self {
+        let offset = offset_of!(Self, raw);
+
+        unsafe { ptr.byte_sub(offset).cast::<Self>() }
+    }
+
+    pub fn store(&self, item: *const T) {
+        unsafe { (*self.item.get()).write(item) };
+    }
+}
 
 pub unsafe trait Linked<R: Role>
 where
