@@ -20,13 +20,13 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 use std::alloc::{AllocatorClone, Global};
 use std::sync::Arc;
 
-struct RawNode {
+pub struct Links {
     prev: AtomicPtr<Self>,
     next: AtomicPtr<Self>,
     _pin: PhantomPinned,
 }
 
-impl RawNode {
+impl Links {
     const fn insert(prev: *const Self, node: *const Self, next: *const Self) {
         unsafe {
             (*prev).next.store(node.cast_mut(), Ordering::Relaxed);
@@ -100,22 +100,13 @@ impl RawNode {
     }
 }
 
-impl IntoIterator for &RawNode {
-    type Item = *const RawNode;
-    type IntoIter = RawIter;
-
-    fn into_iter(self) -> Self::IntoIter {
-        Self::IntoIter::new(ptr::from_ref(self))
-    }
+struct LinksIter {
+    front: *const Links,
+    back: *const Links,
 }
 
-struct RawIter {
-    front: *const RawNode,
-    back: *const RawNode,
-}
-
-impl RawIter {
-    const fn new(node: *const RawNode) -> Self {
+impl LinksIter {
+    const fn new(node: *const Links) -> Self {
         if node.is_null() {
             return Self {
                 front: ptr::null(),
@@ -125,12 +116,12 @@ impl RawIter {
 
         Self {
             front: node,
-            back: RawNode::prev(node),
+            back: Links::prev(node),
         }
     }
 }
 
-impl DoubleEndedIterator for RawIter {
+impl DoubleEndedIterator for LinksIter {
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.back.is_null() {
             return None;
@@ -142,17 +133,17 @@ impl DoubleEndedIterator for RawIter {
             self.front = ptr::null();
             self.back = ptr::null();
         } else {
-            self.back = RawNode::prev(self.back);
+            self.back = Links::prev(self.back);
         }
 
         Some(node)
     }
 }
 
-impl FusedIterator for RawIter {}
+impl FusedIterator for LinksIter {}
 
-impl Iterator for RawIter {
-    type Item = *const RawNode;
+impl Iterator for LinksIter {
+    type Item = *const Links;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.front.is_null() {
@@ -165,7 +156,7 @@ impl Iterator for RawIter {
             self.front = ptr::null();
             self.back = ptr::null();
         } else {
-            self.front = RawNode::next(self.front);
+            self.front = Links::next(self.front);
         }
 
         Some(node)
@@ -175,7 +166,7 @@ impl Iterator for RawIter {
 pub trait Role {}
 
 pub struct Node<T, R: Role> {
-    raw: RawNode,
+    links: Links,
     _marker: PhantomData<fn() -> (T, R)>,
 }
 
@@ -183,19 +174,19 @@ impl<T, R> Node<T, R>
 where
     R: Role,
 {
-    const fn as_raw(ptr: *const Self) -> *const RawNode {
-        unsafe { &raw const (*ptr).raw }
+    const fn as_links(ptr: *const Self) -> *const Links {
+        unsafe { &raw const (*ptr).links }
     }
 
-    const unsafe fn from_raw(ptr: *const RawNode) -> *const Self {
-        let offset = offset_of!(Self, raw);
+    const unsafe fn from_links(ptr: *const Links) -> *const Self {
+        let offset = offset_of!(Self, links);
 
         unsafe { ptr.byte_sub(offset).cast::<Self>() }
     }
 
     pub unsafe fn new() -> Self {
         Self {
-            raw: RawNode::new(),
+            links: Links::new(),
             _marker: PhantomData,
         }
     }
@@ -217,7 +208,7 @@ unsafe impl<T, R: Role> Send for Node<T, R> {}
 unsafe impl<T, R: Role> Sync for Node<T, R> {}
 
 pub struct DTNode<T: ?Sized, R: Role> {
-    raw: RawNode,
+    links: Links,
     item: UnsafeCell<MaybeUninit<*const T>>,
     _marker: PhantomData<(*const T, fn() -> R)>,
 }
@@ -227,12 +218,12 @@ where
     T: ?Sized,
     R: Role,
 {
-    fn as_raw(ptr: *const Self) -> *const RawNode {
-        unsafe { &raw const (*ptr).raw }
+    fn as_links(ptr: *const Self) -> *const Links {
+        unsafe { &raw const (*ptr).links }
     }
 
-    const unsafe fn from_raw(ptr: *const RawNode) -> *const Self {
-        let offset = offset_of!(Self, raw);
+    const unsafe fn from_links(ptr: *const Links) -> *const Self {
+        let offset = offset_of!(Self, links);
 
         unsafe { ptr.byte_sub(offset).cast::<Self>() }
     }
@@ -312,7 +303,7 @@ where
     pub fn try_from_arc(arc: &Arc<T, A>) -> Option<Self> {
         let node = T::as_node(&**arc);
 
-        if !RawNode::try_claim(Node::<T, R>::as_raw(node)) {
+        if !Links::try_claim(Node::<T, R>::as_links(node)) {
             return None;
         }
 
@@ -345,7 +336,7 @@ where
     fn drop(&mut self) {
         let node = T::as_node(&*self.arc);
 
-        RawNode::release(Node::<T, R>::as_raw(node));
+        Links::release(Node::<T, R>::as_links(node));
     }
 }
 
@@ -355,7 +346,7 @@ where
     R: Role,
     A: AllocatorClone,
 {
-    ptr: *const RawNode,
+    ptr: *const Links,
     len: usize,
     alloc: A,
     _marker: PhantomData<fn() -> (T, R)>,
@@ -377,8 +368,8 @@ where
     R: Role,
     A: AllocatorClone,
 {
-    fn get_item(&self, ptr: *const RawNode) -> Arc<T, A> {
-        let node = unsafe { Node::<T, R>::from_raw(ptr) };
+    fn get_item(&self, ptr: *const Links) -> Arc<T, A> {
+        let node = unsafe { Node::<T, R>::from_links(ptr) };
         let item = unsafe { T::as_item(node) };
 
         let arc = ManuallyDrop::new(unsafe { Arc::from_raw_in(item, self.alloc.clone()) });
@@ -419,17 +410,17 @@ where
         }
 
         let head = self.ptr;
-        let tail = RawNode::prev(head);
+        let tail = Links::prev(head);
 
         if unsafe { &*head }.is_singleton() {
             self.ptr = ptr::null();
         }
 
-        RawNode::remove(RawNode::prev(tail), tail, head);
+        Links::remove(Links::prev(tail), tail, head);
 
         self.len -= 1;
 
-        let node = unsafe { Node::<T, R>::from_raw(tail) };
+        let node = unsafe { Node::<T, R>::from_links(tail) };
         let item = unsafe { T::as_item(node) };
 
         Some(unsafe { ListArc::from_raw_in(item, self.alloc.clone()) })
@@ -441,34 +432,34 @@ where
         }
 
         let head = self.ptr;
-        let tail = RawNode::prev(head);
+        let tail = Links::prev(head);
 
         if unsafe { &*head }.is_singleton() {
             self.ptr = ptr::null();
         } else {
-            self.ptr = RawNode::next(head);
+            self.ptr = Links::next(head);
         }
 
-        RawNode::remove(tail, head, RawNode::next(head));
+        Links::remove(tail, head, Links::next(head));
 
         self.len -= 1;
 
-        let node = unsafe { Node::<T, R>::from_raw(head) };
+        let node = unsafe { Node::<T, R>::from_links(head) };
         let item = unsafe { T::as_item(node) };
 
         Some(unsafe { ListArc::from_raw_in(item, self.alloc.clone()) })
     }
 
     pub fn push_front(&mut self, arc: ListArc<T, R, A>) {
-        let node = Node::<T, R>::as_raw(T::as_node(arc.into_raw()));
+        let node = Node::<T, R>::as_links(T::as_node(arc.into_raw()));
 
         if self.is_empty() {
-            RawNode::insert(node, node, node);
+            Links::insert(node, node, node);
         } else {
             let head = self.ptr;
-            let tail = RawNode::prev(head);
+            let tail = Links::prev(head);
 
-            RawNode::insert(tail, node, head);
+            Links::insert(tail, node, head);
         }
 
         self.ptr = node;
@@ -476,10 +467,10 @@ where
     }
 
     pub fn push_back(&mut self, arc: ListArc<T, R, A>) {
-        let node = Node::<T, R>::as_raw(T::as_node(arc.into_raw()));
+        let node = Node::<T, R>::as_links(T::as_node(arc.into_raw()));
 
         if self.is_empty() {
-            RawNode::insert(node, node, node);
+            Links::insert(node, node, node);
 
             self.ptr = node;
             self.len += 1;
@@ -488,9 +479,9 @@ where
         }
 
         let head = self.ptr;
-        let tail = RawNode::prev(head);
+        let tail = Links::prev(head);
 
-        RawNode::insert(tail, node, head);
+        Links::insert(tail, node, head);
 
         self.len += 1;
     }
@@ -501,7 +492,7 @@ where
         }
 
         let head = self.ptr;
-        let tail = RawNode::prev(head);
+        let tail = Links::prev(head);
 
         Some(self.get_item(tail))
     }
@@ -578,7 +569,7 @@ where
 {
     list: &'a List<T, R, A>,
     len: usize,
-    raw: RawIter,
+    links: LinksIter,
 }
 
 impl<'a, T, R, A> Iter<'a, T, R, A>
@@ -591,7 +582,7 @@ where
         Self {
             list: list,
             len: list.len(),
-            raw: RawIter::new(list.ptr),
+            links: LinksIter::new(list.ptr),
         }
     }
 }
@@ -603,11 +594,11 @@ where
     A: AllocatorClone,
 {
     fn next_back(&mut self) -> Option<Self::Item> {
-        let ptr = self.raw.next_back()?;
+        let ptr = self.links.next_back()?;
 
         self.len -= 1;
 
-        let node = unsafe { Node::<T, R>::from_raw(ptr) };
+        let node = unsafe { Node::<T, R>::from_links(ptr) };
 
         Some(unsafe { &*T::as_item(node) })
     }
@@ -641,11 +632,11 @@ where
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let ptr = self.raw.next()?;
+        let ptr = self.links.next()?;
 
         self.len -= 1;
 
-        let node = unsafe { Node::<T, R>::from_raw(ptr) };
+        let node = unsafe { Node::<T, R>::from_links(ptr) };
 
         Some(unsafe { &*T::as_item(node) })
     }
@@ -756,7 +747,7 @@ mod test {
         let _ = check::<List<Item, Foo>>;
     };
 
-    fn ptr(node: Pin<&RawNode>) -> *const RawNode {
+    fn ptr(node: Pin<&Links>) -> *const Links {
         ptr::from_ref(node.get_ref())
     }
 
@@ -764,23 +755,23 @@ mod test {
         ListArc::try_from_arc(&Arc::new(Item::new(data))).unwrap()
     }
 
-    mod raw_node {
+    mod links {
         use super::*;
         use core::pin::{Pin, pin};
 
-        fn prev(node: Pin<&RawNode>) -> *const RawNode {
-            RawNode::prev(ptr(node))
+        fn prev(node: Pin<&Links>) -> *const Links {
+            Links::prev(ptr(node))
         }
 
-        fn next(node: Pin<&RawNode>) -> *const RawNode {
-            RawNode::next(ptr(node))
+        fn next(node: Pin<&Links>) -> *const Links {
+            Links::next(ptr(node))
         }
 
-        fn assert_ring(nodes: &[Pin<&RawNode>]) {
+        fn assert_ring(nodes: &[Pin<&Links>]) {
             let n = nodes.len();
             let expected: Vec<_> = nodes.iter().map(|node| ptr(*node)).collect();
 
-            assert!(RawIter::new(expected[0]).eq(expected.iter().copied()));
+            assert!(LinksIter::new(expected[0]).eq(expected.iter().copied()));
 
             for i in 0..n {
                 let prev = ptr(nodes[(i + n - 1) % n]);
@@ -790,67 +781,67 @@ mod test {
 
         #[test]
         fn insert() {
-            let a = pin!(RawNode::new());
+            let a = pin!(Links::new());
             let a = a.into_ref();
-            let b = pin!(RawNode::new());
+            let b = pin!(Links::new());
             let b = b.into_ref();
 
-            RawNode::insert(ptr(b), ptr(a), ptr(b));
+            Links::insert(ptr(b), ptr(a), ptr(b));
             assert_ring(&[a, b]);
 
-            let c = pin!(RawNode::new());
+            let c = pin!(Links::new());
             let c = c.into_ref();
 
-            RawNode::insert(ptr(b), ptr(c), ptr(a));
+            Links::insert(ptr(b), ptr(c), ptr(a));
             assert_ring(&[a, b, c]);
         }
 
         #[test]
         fn is_singleton() {
-            let node = pin!(RawNode::new());
+            let node = pin!(Links::new());
             let node = node.into_ref();
 
             assert!(!node.is_singleton());
 
-            RawNode::insert(ptr(node), ptr(node), ptr(node));
+            Links::insert(ptr(node), ptr(node), ptr(node));
 
             assert!(node.is_singleton());
         }
 
         #[test]
         fn remove() {
-            let a = pin!(RawNode::new());
+            let a = pin!(Links::new());
             let a = a.into_ref();
-            let b = pin!(RawNode::new());
+            let b = pin!(Links::new());
             let b = b.into_ref();
-            let c = pin!(RawNode::new());
+            let c = pin!(Links::new());
             let c = c.into_ref();
 
-            RawNode::insert(ptr(b), ptr(a), ptr(b));
-            RawNode::insert(ptr(b), ptr(c), ptr(a));
+            Links::insert(ptr(b), ptr(a), ptr(b));
+            Links::insert(ptr(b), ptr(c), ptr(a));
 
-            RawNode::remove(ptr(b), ptr(c), ptr(a));
+            Links::remove(ptr(b), ptr(c), ptr(a));
 
             assert!(c.is_singleton());
             assert_ring(&[a, b]);
 
-            RawNode::remove(ptr(b), ptr(a), ptr(b));
+            Links::remove(ptr(b), ptr(a), ptr(b));
 
             assert!(a.is_singleton());
             assert!(b.is_singleton());
 
-            RawNode::remove(ptr(b), ptr(b), ptr(b));
+            Links::remove(ptr(b), ptr(b), ptr(b));
 
             assert!(b.is_singleton());
         }
     }
 
-    mod raw_iter {
+    mod links_iter {
         use super::*;
 
         #[test]
         fn empty() {
-            let mut iter = RawIter::new(ptr::null());
+            let mut iter = LinksIter::new(ptr::null());
 
             assert_eq!(iter.next(), None);
             assert_eq!(iter.next_back(), None);
@@ -860,10 +851,10 @@ mod test {
 
         #[test]
         fn unlinked() {
-            let node = pin!(RawNode::new());
+            let node = pin!(Links::new());
             let node = node.into_ref();
 
-            let mut iter = RawIter::new(ptr(node));
+            let mut iter = LinksIter::new(ptr(node));
 
             assert_eq!(iter.next(), Some(ptr(node)));
             assert_eq!(iter.next(), None);
@@ -872,18 +863,18 @@ mod test {
 
         #[test]
         fn singleton() {
-            let node = pin!(RawNode::new());
+            let node = pin!(Links::new());
             let node = node.into_ref();
 
-            RawNode::insert(ptr(node), ptr(node), ptr(node));
+            Links::insert(ptr(node), ptr(node), ptr(node));
 
-            let mut iter = RawIter::new(ptr(node));
+            let mut iter = LinksIter::new(ptr(node));
 
             assert_eq!(iter.next(), Some(ptr(node)));
             assert_eq!(iter.next(), None);
             assert_eq!(iter.next_back(), None);
 
-            let mut iter = RawIter::new(ptr(node));
+            let mut iter = LinksIter::new(ptr(node));
 
             assert_eq!(iter.next_back(), Some(ptr(node)));
             assert_eq!(iter.next_back(), None);
@@ -892,59 +883,47 @@ mod test {
 
         #[test]
         fn forward_three() {
-            let a = pin!(RawNode::new());
+            let a = pin!(Links::new());
             let a = a.into_ref();
-            let b = pin!(RawNode::new());
+            let b = pin!(Links::new());
             let b = b.into_ref();
-            let c = pin!(RawNode::new());
+            let c = pin!(Links::new());
             let c = c.into_ref();
 
-            RawNode::insert(ptr(b), ptr(a), ptr(b));
-            RawNode::insert(ptr(b), ptr(c), ptr(a));
+            Links::insert(ptr(b), ptr(a), ptr(b));
+            Links::insert(ptr(b), ptr(c), ptr(a));
 
-            assert!(RawIter::new(ptr(a)).eq([ptr(a), ptr(b), ptr(c)]));
-        }
-
-        #[test]
-        fn into_iter_matches_new() {
-            let a = pin!(RawNode::new());
-            let a = a.into_ref();
-            let b = pin!(RawNode::new());
-            let b = b.into_ref();
-
-            RawNode::insert(ptr(b), ptr(a), ptr(b));
-
-            assert!(a.get_ref().into_iter().eq(RawIter::new(ptr(a))));
+            assert!(LinksIter::new(ptr(a)).eq([ptr(a), ptr(b), ptr(c)]));
         }
 
         #[test]
         fn rev_three() {
-            let a = pin!(RawNode::new());
+            let a = pin!(Links::new());
             let a = a.into_ref();
-            let b = pin!(RawNode::new());
+            let b = pin!(Links::new());
             let b = b.into_ref();
-            let c = pin!(RawNode::new());
+            let c = pin!(Links::new());
             let c = c.into_ref();
 
-            RawNode::insert(ptr(b), ptr(a), ptr(b));
-            RawNode::insert(ptr(b), ptr(c), ptr(a));
+            Links::insert(ptr(b), ptr(a), ptr(b));
+            Links::insert(ptr(b), ptr(c), ptr(a));
 
-            assert!(RawIter::new(ptr(a)).rev().eq([ptr(c), ptr(b), ptr(a)]));
+            assert!(LinksIter::new(ptr(a)).rev().eq([ptr(c), ptr(b), ptr(a)]));
         }
 
         #[test]
         fn both_ends_three() {
-            let a = pin!(RawNode::new());
+            let a = pin!(Links::new());
             let a = a.into_ref();
-            let b = pin!(RawNode::new());
+            let b = pin!(Links::new());
             let b = b.into_ref();
-            let c = pin!(RawNode::new());
+            let c = pin!(Links::new());
             let c = c.into_ref();
 
-            RawNode::insert(ptr(b), ptr(a), ptr(b));
-            RawNode::insert(ptr(b), ptr(c), ptr(a));
+            Links::insert(ptr(b), ptr(a), ptr(b));
+            Links::insert(ptr(b), ptr(c), ptr(a));
 
-            let mut iter = RawIter::new(ptr(a));
+            let mut iter = LinksIter::new(ptr(a));
 
             assert_eq!(iter.next(), Some(ptr(a)));
             assert_eq!(iter.next_back(), Some(ptr(c)));
