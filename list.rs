@@ -259,7 +259,7 @@ macro_rules! linked {
 }
 
 pub unsafe trait DynLinked<R: Role> {
-    fn node(&self) -> *const DynNode<dyn DynLinked<R>, R>;
+    fn as_dyn_node(&self) -> *const DynNode<dyn DynLinked<R>, R>;
 }
 
 pub struct ListArc<T, R, A = Global>
