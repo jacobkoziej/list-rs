@@ -174,11 +174,11 @@ impl<T, R> Node<T, R>
 where
     R: Role,
 {
-    const fn as_links(ptr: *const Self) -> *const Links {
+    pub const fn as_links(ptr: *const Self) -> *const Links {
         unsafe { &raw const (*ptr).links }
     }
 
-    const unsafe fn from_links(ptr: *const Links) -> *const Self {
+    pub const unsafe fn from_links(ptr: *const Links) -> *const Self {
         let offset = offset_of!(Self, links);
 
         unsafe { ptr.byte_sub(offset).cast::<Self>() }
@@ -200,7 +200,9 @@ where
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &*Self::Target::as_item(ptr::from_ref(self)) }
+        let links = Self::as_links(ptr::from_ref(self));
+
+        unsafe { &*Self::Target::from_links(links) }
     }
 }
 
@@ -228,31 +230,58 @@ where
         unsafe { ptr.byte_sub(offset).cast::<Self>() }
     }
 
+    pub unsafe fn new() -> Self {
+        Self {
+            links: Links::new(),
+            item: UnsafeCell::new(MaybeUninit::uninit()),
+            _marker: PhantomData,
+        }
+    }
+
     pub fn store(&self, item: *const T) {
         unsafe { (*self.item.get()).write(item) };
     }
 }
 
-pub unsafe trait Linked<R: Role>
-where
-    Self: Sized,
-{
-    unsafe fn as_item(node: *const Node<Self, R>) -> *const Self;
-    fn as_node(ptr: *const Self) -> *const Node<Self, R>;
+unsafe impl<T: ?Sized, R: Role> Send for DynNode<T, R> {}
+unsafe impl<T: ?Sized, R: Role> Sync for DynNode<T, R> {}
+
+pub unsafe trait Linked<R: Role> {
+    fn as_links(ptr: *const Self) -> *const Links;
+    unsafe fn from_links(ptr: *const Links) -> *const Self;
+}
+
+unsafe impl<R: Role> Linked<R> for dyn DynLinked<R> {
+    fn as_links(ptr: *const Self) -> *const Links {
+        let node = unsafe { (*ptr).as_dyn_node() };
+
+        unsafe { (*node).store(ptr) };
+
+        DynNode::<Self, R>::as_links(node)
+    }
+
+    unsafe fn from_links(ptr: *const Links) -> *const Self {
+        let node = unsafe { DynNode::<Self, R>::from_links(ptr) };
+
+        unsafe { (*(*node).item.get()).assume_init_read() }
+    }
 }
 
 #[macro_export]
 macro_rules! linked {
     ($ty:ty, $role:ty, $field:ident) => {
         unsafe impl $crate::Linked<$role> for $ty {
-            unsafe fn as_item(node: *const $crate::Node<Self, $role>) -> *const Self {
+            fn as_links(ptr: *const Self) -> *const $crate::Links {
+                let node = unsafe { &raw const (*ptr).$field };
+
+                $crate::Node::<Self, $role>::as_links(node)
+            }
+
+            unsafe fn from_links(ptr: *const $crate::Links) -> *const Self {
+                let node = unsafe { $crate::Node::<Self, $role>::from_links(ptr) };
                 let offset = ::core::mem::offset_of!(Self, $field);
 
                 unsafe { node.byte_sub(offset).cast::<Self>() }
-            }
-
-            fn as_node(ptr: *const Self) -> *const $crate::Node<Self, $role> {
-                unsafe { &raw const (*ptr).$field }
             }
         }
     };
@@ -264,7 +293,7 @@ pub unsafe trait DynLinked<R: Role> {
 
 pub struct ListArc<T, R, A = Global>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: Allocator,
 {
@@ -274,7 +303,7 @@ where
 
 impl<T, R, A> ListArc<T, R, A>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: Allocator,
 {
@@ -296,14 +325,14 @@ where
 
 impl<T, R, A> ListArc<T, R, A>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: AllocatorClone,
 {
     pub fn try_from_arc(arc: &Arc<T, A>) -> Option<Self> {
-        let node = T::as_node(&**arc);
+        let links = T::as_links(&**arc);
 
-        if !Links::try_claim(Node::<T, R>::as_links(node)) {
+        if !Links::try_claim(links) {
             return None;
         }
 
@@ -316,7 +345,7 @@ where
 
 impl<T, R, A> Deref for ListArc<T, R, A>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: Allocator,
 {
@@ -329,32 +358,32 @@ where
 
 impl<T, R, A> Drop for ListArc<T, R, A>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: Allocator,
 {
     fn drop(&mut self) {
-        let node = T::as_node(&*self.arc);
+        let links = T::as_links(&*self.arc);
 
-        Links::release(Node::<T, R>::as_links(node));
+        Links::release(links);
     }
 }
 
 pub struct List<T, R, A = Global>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: AllocatorClone,
 {
     ptr: *const Links,
     len: usize,
     alloc: A,
-    _marker: PhantomData<fn() -> (T, R)>,
+    _marker: PhantomData<(*const T, fn() -> R)>,
 }
 
 impl<T, R> List<T, R>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
 {
     pub const fn new() -> Self {
@@ -364,13 +393,12 @@ where
 
 impl<T, R, A> List<T, R, A>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: AllocatorClone,
 {
     fn get_item(&self, ptr: *const Links) -> Arc<T, A> {
-        let node = unsafe { Node::<T, R>::from_links(ptr) };
-        let item = unsafe { T::as_item(node) };
+        let item = unsafe { T::from_links(ptr) };
 
         let arc = ManuallyDrop::new(unsafe { Arc::from_raw_in(item, self.alloc.clone()) });
 
@@ -420,8 +448,7 @@ where
 
         self.len -= 1;
 
-        let node = unsafe { Node::<T, R>::from_links(tail) };
-        let item = unsafe { T::as_item(node) };
+        let item = unsafe { T::from_links(tail) };
 
         Some(unsafe { ListArc::from_raw_in(item, self.alloc.clone()) })
     }
@@ -444,14 +471,13 @@ where
 
         self.len -= 1;
 
-        let node = unsafe { Node::<T, R>::from_links(head) };
-        let item = unsafe { T::as_item(node) };
+        let item = unsafe { T::from_links(head) };
 
         Some(unsafe { ListArc::from_raw_in(item, self.alloc.clone()) })
     }
 
     pub fn push_front(&mut self, arc: ListArc<T, R, A>) {
-        let node = Node::<T, R>::as_links(T::as_node(arc.into_raw()));
+        let node = T::as_links(arc.into_raw());
 
         if self.is_empty() {
             Links::insert(node, node, node);
@@ -467,7 +493,7 @@ where
     }
 
     pub fn push_back(&mut self, arc: ListArc<T, R, A>) {
-        let node = Node::<T, R>::as_links(T::as_node(arc.into_raw()));
+        let node = T::as_links(arc.into_raw());
 
         if self.is_empty() {
             Links::insert(node, node, node);
@@ -500,7 +526,7 @@ where
 
 impl<T, R, A> Drop for List<T, R, A>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -511,7 +537,7 @@ where
 
 impl<T, R> FromIterator<ListArc<T, R>> for List<T, R>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
 {
     fn from_iter<I: IntoIterator<Item = ListArc<T, R>>>(iter: I) -> Self {
@@ -527,7 +553,7 @@ where
 
 impl<T, R, A> IntoIterator for List<T, R, A>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -541,7 +567,7 @@ where
 
 impl<'a, T, R, A> IntoIterator for &'a List<T, R, A>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -555,7 +581,7 @@ where
 
 unsafe impl<T, R, A> Send for List<T, R, A>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: AllocatorClone + Send,
 {
@@ -563,7 +589,7 @@ where
 
 pub struct Iter<'a, T, R, A = Global>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -574,7 +600,7 @@ where
 
 impl<'a, T, R, A> Iter<'a, T, R, A>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -589,7 +615,7 @@ where
 
 impl<'a, T, R, A> DoubleEndedIterator for Iter<'a, T, R, A>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -598,15 +624,13 @@ where
 
         self.len -= 1;
 
-        let node = unsafe { Node::<T, R>::from_links(ptr) };
-
-        Some(unsafe { &*T::as_item(node) })
+        Some(unsafe { &*T::from_links(ptr) })
     }
 }
 
 impl<'a, T, R, A> ExactSizeIterator for Iter<'a, T, R, A>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -617,7 +641,7 @@ where
 
 impl<'a, T, R, A> FusedIterator for Iter<'a, T, R, A>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -625,7 +649,7 @@ where
 
 impl<'a, T, R, A> Iterator for Iter<'a, T, R, A>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -636,21 +660,19 @@ where
 
         self.len -= 1;
 
-        let node = unsafe { Node::<T, R>::from_links(ptr) };
-
-        Some(unsafe { &*T::as_item(node) })
+        Some(unsafe { &*T::from_links(ptr) })
     }
 }
 
 pub struct IntoIter<T, R, A = Global>(List<T, R, A>)
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: AllocatorClone;
 
 impl<T, R, A> IntoIter<T, R, A>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -661,7 +683,7 @@ where
 
 impl<T, R, A> DoubleEndedIterator for IntoIter<T, R, A>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -672,7 +694,7 @@ where
 
 impl<T, R, A> ExactSizeIterator for IntoIter<T, R, A>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -683,7 +705,7 @@ where
 
 impl<T, R, A> FusedIterator for IntoIter<T, R, A>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -691,7 +713,7 @@ where
 
 impl<T, R, A> Iterator for IntoIter<T, R, A>
 where
-    T: Linked<R>,
+    T: Linked<R> + ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -735,6 +757,11 @@ mod test {
     const _: () = {
         fn check<T: Send + Sync>() {}
         let _ = check::<Node<Item, Foo>>;
+    };
+
+    const _: () = {
+        fn check<T: Send + Sync>() {}
+        let _ = check::<DynNode<dyn DynLinked<Bar>, Bar>>;
     };
 
     const _: () = {
