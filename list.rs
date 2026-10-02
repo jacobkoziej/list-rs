@@ -291,6 +291,17 @@ pub unsafe trait DynLinked<R: Role> {
     fn as_dyn_node(&self) -> *const DynNode<dyn DynLinked<R>, R>;
 }
 
+#[macro_export]
+macro_rules! dyn_linked {
+    ($ty:ty, $role:ty, $field:ident) => {
+        unsafe impl $crate::DynLinked<$role> for $ty {
+            fn as_dyn_node(&self) -> *const $crate::DynNode<dyn $crate::DynLinked<$role>, $role> {
+                ::core::ptr::from_ref(&self.$field)
+            }
+        }
+    };
+}
+
 pub struct ListArc<T, R, A = Global>
 where
     T: Linked<R> + ?Sized,
