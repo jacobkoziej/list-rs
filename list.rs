@@ -257,6 +257,8 @@ unsafe impl<T: ?Sized, R: Role> Sync for PtrNode<T, R> {}
 pub unsafe trait Linkable<T: ?Sized, R: Role> {
     fn as_links(ptr: *const T) -> *const Links;
     unsafe fn from_links(ptr: *const Links) -> *const T;
+
+    unsafe fn store(_ptr: *const T) {}
 }
 
 #[macro_export]
@@ -295,8 +297,6 @@ where
     fn as_links(ptr: *const T) -> *const Links {
         let node = unsafe { <T as DynLinkable<T, R>>::as_ptr_node(&*ptr) };
 
-        unsafe { (*node).store(ptr) };
-
         InnerLinks::as_links(node)
     }
 
@@ -304,6 +304,12 @@ where
         let node: &PtrNode<T, R> = unsafe { &*InnerLinks::from_links(ptr) };
 
         unsafe { (*node.ptr.get()).assume_init_read() }
+    }
+
+    unsafe fn store(ptr: *const T) {
+        let node = unsafe { <T as DynLinkable<T, R>>::as_ptr_node(&*ptr) };
+
+        unsafe { (*node).store(ptr) };
     }
 }
 
@@ -360,11 +366,15 @@ where
     A: AllocatorClone,
 {
     pub fn try_from_arc(arc: &Arc<T, A>) -> Option<Self> {
-        let links = U::as_links(&**arc);
+        let ptr = Arc::as_ptr(arc);
+
+        let links = U::as_links(ptr);
 
         if !Links::try_claim(links) {
             return None;
         }
+
+        unsafe { U::store(ptr) };
 
         Some(Self {
             arc: Arc::clone(arc),
@@ -1068,6 +1078,8 @@ mod test {
             let item = SelfNode::new(-2);
 
             let links = <SelfNode as Linkable<SelfNode, Bar>>::as_links(ptr::from_ref(&item));
+
+            unsafe { <SelfNode as Linkable<SelfNode, Bar>>::store(ptr::from_ref(&item)) };
 
             let ptr = unsafe { <SelfNode as Linkable<SelfNode, Bar>>::from_links(links) };
 
