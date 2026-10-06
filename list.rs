@@ -318,19 +318,21 @@ macro_rules! dyn_linkable {
     };
 }
 
-pub struct ListArc<T, R, A = Global>
+pub struct ListArc<T, R, U = T, A = Global>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: Allocator,
 {
     arc: Arc<T, A>,
-    _marker: PhantomData<fn() -> R>,
+    _marker: PhantomData<fn() -> (*const U, R)>,
 }
 
-impl<T, R, A> ListArc<T, R, A>
+impl<U, T, R, A> ListArc<T, R, U, A>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: Allocator,
 {
@@ -350,14 +352,15 @@ where
     }
 }
 
-impl<T, R, A> ListArc<T, R, A>
+impl<U, T, R, A> ListArc<T, R, U, A>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: AllocatorClone,
 {
     pub fn try_from_arc(arc: &Arc<T, A>) -> Option<Self> {
-        let links = T::as_links(&**arc);
+        let links = U::as_links(&**arc);
 
         if !Links::try_claim(links) {
             return None;
@@ -370,9 +373,10 @@ where
     }
 }
 
-impl<T, R, A> Deref for ListArc<T, R, A>
+impl<U, T, R, A> Deref for ListArc<T, R, U, A>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: Allocator,
 {
@@ -383,34 +387,37 @@ where
     }
 }
 
-impl<T, R, A> Drop for ListArc<T, R, A>
+impl<U, T, R, A> Drop for ListArc<T, R, U, A>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: Allocator,
 {
     fn drop(&mut self) {
-        let links = T::as_links(&*self.arc);
+        let links = U::as_links(&*self.arc);
 
         Links::release(links);
     }
 }
 
-pub struct List<T, R, A = Global>
+pub struct List<T, R, U = T, A = Global>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: AllocatorClone,
 {
     ptr: *const Links,
     len: usize,
     alloc: A,
-    _marker: PhantomData<(*const T, fn() -> R)>,
+    _marker: PhantomData<fn() -> (*const U, *const T, R)>,
 }
 
-impl<T, R> List<T, R>
+impl<U, T, R> List<T, R, U>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
 {
     pub const fn new() -> Self {
@@ -418,14 +425,15 @@ where
     }
 }
 
-impl<T, R, A> List<T, R, A>
+impl<U, T, R, A> List<T, R, U, A>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: AllocatorClone,
 {
     fn get_item(&self, ptr: *const Links) -> Arc<T, A> {
-        let item = unsafe { T::from_links(ptr) };
+        let item = unsafe { U::from_links(ptr) };
 
         let arc = ManuallyDrop::new(unsafe { Arc::from_raw_in(item, self.alloc.clone()) });
 
@@ -459,7 +467,7 @@ where
         }
     }
 
-    pub fn pop_back(&mut self) -> Option<ListArc<T, R, A>> {
+    pub fn pop_back(&mut self) -> Option<ListArc<T, R, U, A>> {
         if self.is_empty() {
             return None;
         }
@@ -475,12 +483,12 @@ where
 
         self.len -= 1;
 
-        let item = unsafe { T::from_links(tail) };
+        let item = unsafe { U::from_links(tail) };
 
         Some(unsafe { ListArc::from_raw_in(item, self.alloc.clone()) })
     }
 
-    pub fn pop_front(&mut self) -> Option<ListArc<T, R, A>> {
+    pub fn pop_front(&mut self) -> Option<ListArc<T, R, U, A>> {
         if self.is_empty() {
             return None;
         }
@@ -498,13 +506,13 @@ where
 
         self.len -= 1;
 
-        let item = unsafe { T::from_links(head) };
+        let item = unsafe { U::from_links(head) };
 
         Some(unsafe { ListArc::from_raw_in(item, self.alloc.clone()) })
     }
 
-    pub fn push_front(&mut self, arc: ListArc<T, R, A>) {
-        let node = T::as_links(arc.into_raw());
+    pub fn push_front(&mut self, arc: ListArc<T, R, U, A>) {
+        let node = U::as_links(arc.into_raw());
 
         if self.is_empty() {
             Links::insert(node, node, node);
@@ -519,8 +527,8 @@ where
         self.len += 1;
     }
 
-    pub fn push_back(&mut self, arc: ListArc<T, R, A>) {
-        let node = T::as_links(arc.into_raw());
+    pub fn push_back(&mut self, arc: ListArc<T, R, U, A>) {
+        let node = U::as_links(arc.into_raw());
 
         if self.is_empty() {
             Links::insert(node, node, node);
@@ -551,9 +559,10 @@ where
     }
 }
 
-impl<T, R, A> Drop for List<T, R, A>
+impl<U, T, R, A> Drop for List<T, R, U, A>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -562,13 +571,14 @@ where
     }
 }
 
-impl<T, R> FromIterator<ListArc<T, R>> for List<T, R>
+impl<U, T, R> FromIterator<ListArc<T, R, U>> for List<T, R, U>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
 {
-    fn from_iter<I: IntoIterator<Item = ListArc<T, R>>>(iter: I) -> Self {
-        let mut list = List::<T, R>::new();
+    fn from_iter<I: IntoIterator<Item = ListArc<T, R, U>>>(iter: I) -> Self {
+        let mut list = List::<T, R, U>::new();
 
         for i in iter {
             list.push_back(i)
@@ -578,60 +588,65 @@ where
     }
 }
 
-impl<T, R, A> IntoIterator for List<T, R, A>
+impl<U, T, R, A> IntoIterator for List<T, R, U, A>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: AllocatorClone,
 {
-    type Item = ListArc<T, R, A>;
-    type IntoIter = IntoIter<T, R, A>;
+    type Item = ListArc<T, R, U, A>;
+    type IntoIter = IntoIter<T, R, U, A>;
 
     fn into_iter(self) -> Self::IntoIter {
         Self::IntoIter::new(self)
     }
 }
 
-impl<'a, T, R, A> IntoIterator for &'a List<T, R, A>
+impl<'a, U, T, R, A> IntoIterator for &'a List<T, R, U, A>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: AllocatorClone,
 {
     type Item = &'a T;
-    type IntoIter = Iter<'a, T, R, A>;
+    type IntoIter = Iter<'a, T, R, U, A>;
 
     fn into_iter(self) -> Self::IntoIter {
         Self::IntoIter::new(self)
     }
 }
 
-unsafe impl<T, R, A> Send for List<T, R, A>
+unsafe impl<U, T, R, A> Send for List<T, R, U, A>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: AllocatorClone + Send,
 {
 }
 
-pub struct Iter<'a, T, R, A = Global>
+pub struct Iter<'a, T, R, U = T, A = Global>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: AllocatorClone,
 {
-    list: &'a List<T, R, A>,
+    list: &'a List<T, R, U, A>,
     len: usize,
     links: LinksIter,
 }
 
-impl<'a, T, R, A> Iter<'a, T, R, A>
+impl<'a, U, T, R, A> Iter<'a, T, R, U, A>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: AllocatorClone,
 {
-    pub fn new(list: &'a List<T, R, A>) -> Self {
+    pub fn new(list: &'a List<T, R, U, A>) -> Self {
         Self {
             list: list,
             len: list.len(),
@@ -640,9 +655,10 @@ where
     }
 }
 
-impl<'a, T, R, A> DoubleEndedIterator for Iter<'a, T, R, A>
+impl<'a, U, T, R, A> DoubleEndedIterator for Iter<'a, T, R, U, A>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -651,13 +667,14 @@ where
 
         self.len -= 1;
 
-        Some(unsafe { &*T::from_links(ptr) })
+        Some(unsafe { &*U::from_links(ptr) })
     }
 }
 
-impl<'a, T, R, A> ExactSizeIterator for Iter<'a, T, R, A>
+impl<'a, U, T, R, A> ExactSizeIterator for Iter<'a, T, R, U, A>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -666,17 +683,19 @@ where
     }
 }
 
-impl<'a, T, R, A> FusedIterator for Iter<'a, T, R, A>
+impl<'a, U, T, R, A> FusedIterator for Iter<'a, T, R, U, A>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: AllocatorClone,
 {
 }
 
-impl<'a, T, R, A> Iterator for Iter<'a, T, R, A>
+impl<'a, U, T, R, A> Iterator for Iter<'a, T, R, U, A>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -687,30 +706,33 @@ where
 
         self.len -= 1;
 
-        Some(unsafe { &*T::from_links(ptr) })
+        Some(unsafe { &*U::from_links(ptr) })
     }
 }
 
-pub struct IntoIter<T, R, A = Global>(List<T, R, A>)
+pub struct IntoIter<T, R, U = T, A = Global>(List<T, R, U, A>)
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: AllocatorClone;
 
-impl<T, R, A> IntoIter<T, R, A>
+impl<U, T, R, A> IntoIter<T, R, U, A>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: AllocatorClone,
 {
-    pub fn new(list: List<T, R, A>) -> Self {
+    pub fn new(list: List<T, R, U, A>) -> Self {
         Self(list)
     }
 }
 
-impl<T, R, A> DoubleEndedIterator for IntoIter<T, R, A>
+impl<U, T, R, A> DoubleEndedIterator for IntoIter<T, R, U, A>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -719,9 +741,10 @@ where
     }
 }
 
-impl<T, R, A> ExactSizeIterator for IntoIter<T, R, A>
+impl<U, T, R, A> ExactSizeIterator for IntoIter<T, R, U, A>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: AllocatorClone,
 {
@@ -730,21 +753,23 @@ where
     }
 }
 
-impl<T, R, A> FusedIterator for IntoIter<T, R, A>
+impl<U, T, R, A> FusedIterator for IntoIter<T, R, U, A>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: AllocatorClone,
 {
 }
 
-impl<T, R, A> Iterator for IntoIter<T, R, A>
+impl<U, T, R, A> Iterator for IntoIter<T, R, U, A>
 where
-    T: Linkable<T, R> + ?Sized,
+    U: Linkable<T, R> + ?Sized,
+    T: ?Sized,
     R: Role,
     A: AllocatorClone,
 {
-    type Item = ListArc<T, R, A>;
+    type Item = ListArc<T, R, U, A>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.pop_front()
