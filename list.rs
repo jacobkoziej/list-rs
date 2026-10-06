@@ -217,6 +217,10 @@ where
     T: ?Sized,
     R: Role,
 {
+    pub unsafe fn load(&self) -> *const T {
+        unsafe { (*self.ptr.get()).assume_init_read() }
+    }
+
     pub unsafe fn new() -> Self {
         Self {
             links: Links::new(),
@@ -1016,6 +1020,88 @@ mod test {
             fn value(&self) -> u64 {
                 self.data as u64
             }
+        }
+
+        #[test]
+        fn blanket_stores_and_reads_pointer() {
+            struct SelfNode {
+                data: i32,
+                node: PtrNode<Self, Bar>,
+            }
+
+            impl SelfNode {
+                fn new(data: i32) -> Self {
+                    Self {
+                        data,
+                        node: unsafe { PtrNode::new() },
+                    }
+                }
+            }
+
+            dyn_linkable! {SelfNode, SelfNode, Bar, node}
+
+            let item = SelfNode::new(-2);
+
+            let links = <SelfNode as Linkable<SelfNode, Bar>>::as_links(ptr::from_ref(&item));
+
+            let ptr = unsafe { <SelfNode as Linkable<SelfNode, Bar>>::from_links(links) };
+
+            assert!(ptr::eq(ptr, ptr::from_ref(&item)));
+
+            assert_eq!(unsafe { &*ptr }.data, -2);
+        }
+
+        fn addr(object: *const dyn ItemLike) -> *const () {
+            object.cast()
+        }
+
+        #[test]
+        fn as_ptr_node_returns_field() {
+            let thing = Thing::new(1);
+
+            assert!(ptr::eq(
+                DynLinkable::<dyn ItemLike, Bar>::as_ptr_node(&thing),
+                ptr::from_ref(&thing.node),
+            ));
+        }
+
+        #[test]
+        fn load_reads_stored_pointer() {
+            let thing = Thing::new(-2);
+
+            let object: *const dyn ItemLike = &thing;
+
+            let node = thing.as_ptr_node();
+
+            unsafe { (*node).store(object) };
+
+            let ptr = unsafe { (*node).load() };
+
+            assert!(ptr::eq(addr(object), addr(ptr)));
+
+            assert_eq!(unsafe { &*ptr }.value(), -2i32 as u64);
+        }
+
+        #[test]
+        fn distinct_trait_objects() {
+            let item = Item::new(1);
+            let thing = Thing::new(-2);
+
+            let item_object: *const dyn ItemLike = &item;
+            let thing_object: *const dyn ItemLike = &thing;
+
+            unsafe { (*item.as_ptr_node()).store(item_object) };
+            unsafe { (*thing.as_ptr_node()).store(thing_object) };
+
+            let loaded_item = unsafe { (*item.as_ptr_node()).load() };
+            let loaded_thing = unsafe { (*thing.as_ptr_node()).load() };
+
+            assert!(ptr::eq(addr(item_object), addr(loaded_item)));
+            assert!(ptr::eq(addr(thing_object), addr(loaded_thing)));
+            assert!(!ptr::eq(addr(loaded_item), addr(loaded_thing)));
+
+            assert_eq!(unsafe { &*loaded_item }.value(), 1);
+            assert_eq!(unsafe { &*loaded_thing }.value(), -2i32 as u64);
         }
     }
 
