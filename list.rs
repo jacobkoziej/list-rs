@@ -5,6 +5,7 @@
 
 #![feature(allocator_api)]
 #![feature(const_atomic)]
+#![feature(ptr_metadata)]
 #![allow(dead_code)]
 
 use core::alloc::Allocator;
@@ -13,9 +14,9 @@ use core::iter::{
     DoubleEndedIterator, ExactSizeIterator, FromIterator, FusedIterator, IntoIterator, Iterator,
 };
 use core::marker::{PhantomData, PhantomPinned};
-use core::mem::{ManuallyDrop, MaybeUninit, offset_of};
+use core::mem::{ManuallyDrop, offset_of, transmute};
 use core::ops::{Deref, Drop};
-use core::ptr;
+use core::ptr::{self, DynMetadata, Pointee};
 use core::sync::atomic::{AtomicPtr, Ordering};
 use std::alloc::{AllocatorClone, Global};
 use std::sync::Arc;
@@ -34,6 +35,10 @@ impl Links {
             (*node).next.store(next.cast_mut(), Ordering::Relaxed);
             (*next).prev.store(node.cast_mut(), Ordering::Relaxed);
         }
+    }
+
+    const fn is_locked(&self) -> bool {
+        !self.next.load(Ordering::Relaxed).is_null()
     }
 
     fn is_singleton(&self) -> bool {
@@ -205,39 +210,31 @@ where
 unsafe impl<R: Role> Send for Node<R> {}
 unsafe impl<R: Role> Sync for Node<R> {}
 
-pub struct PtrNode<T: ?Sized, R: Role> {
+pub struct DynNode<R: Role> {
     links: Links,
-    ptr: UnsafeCell<MaybeUninit<*const T>>,
+    data: UnsafeCell<*const ()>,
+    meta: UnsafeCell<*const ()>,
     _marker: PhantomData<fn() -> R>,
     _pin: PhantomPinned,
 }
 
-impl<T, R> PtrNode<T, R>
+impl<R> DynNode<R>
 where
-    T: ?Sized,
     R: Role,
 {
-    pub unsafe fn load(&self) -> *const T {
-        unsafe { (*self.ptr.get()).assume_init_read() }
-    }
-
     pub unsafe fn new() -> Self {
         Self {
             links: Links::new(),
-            ptr: UnsafeCell::new(MaybeUninit::uninit()),
+            data: UnsafeCell::new(ptr::null()),
+            meta: UnsafeCell::new(ptr::null()),
             _marker: PhantomData,
             _pin: PhantomPinned,
         }
     }
-
-    pub unsafe fn store(&self, ptr: *const T) {
-        unsafe { MaybeUninit::write(&mut *self.ptr.get(), ptr) };
-    }
 }
 
-impl<T, R> InnerLinks for PtrNode<T, R>
+impl<R> InnerLinks for DynNode<R>
 where
-    T: ?Sized,
     R: Role,
 {
     fn as_links(ptr: *const Self) -> *const Links {
@@ -251,20 +248,18 @@ where
     }
 }
 
-unsafe impl<T: ?Sized, R: Role> Send for PtrNode<T, R> {}
-unsafe impl<T: ?Sized, R: Role> Sync for PtrNode<T, R> {}
+unsafe impl<R: Role> Send for DynNode<R> {}
+unsafe impl<R: Role> Sync for DynNode<R> {}
 
-pub unsafe trait Linkable<T: ?Sized, R: Role> {
-    fn as_links(ptr: *const T) -> *const Links;
-    unsafe fn from_links(ptr: *const Links) -> *const T;
-
-    unsafe fn store(_ptr: *const T) {}
+pub unsafe trait Linkable<R: Role> {
+    fn as_links(ptr: *const Self) -> *const Links;
+    unsafe fn from_links(ptr: *const Links) -> *const Self;
 }
 
 #[macro_export]
 macro_rules! linkable {
     ($ty:ty, $role:ty, $field:ident) => {
-        unsafe impl $crate::Linkable<$ty, $role> for $ty {
+        unsafe impl $crate::Linkable<$role> for $ty {
             fn as_links(ptr: *const Self) -> *const $crate::Links {
                 let node = unsafe { &raw const (*ptr).$field };
 
@@ -282,63 +277,64 @@ macro_rules! linkable {
     };
 }
 
-pub unsafe trait DynLinkable<T: ?Sized, R: Role>
-where
-    Self: Sized,
-{
-    fn as_ptr_node(&self) -> *const PtrNode<T, R>;
+pub unsafe trait DynLinkable<R: Role> {
+    fn as_dyn_node(&self) -> *const DynNode<R>;
 }
 
-unsafe impl<T, R> Linkable<T, R> for T
+unsafe impl<T, R> Linkable<R> for T
 where
-    T: DynLinkable<T, R>,
+    T: ?Sized + DynLinkable<R> + Pointee<Metadata = DynMetadata<T>>,
     R: Role,
 {
     fn as_links(ptr: *const T) -> *const Links {
-        let node = unsafe { <T as DynLinkable<T, R>>::as_ptr_node(&*ptr) };
+        let node = unsafe { &*<T as DynLinkable<R>>::as_dyn_node(&*ptr) };
+
+        if node.links.is_locked() {
+            let (data, meta) = ptr.to_raw_parts();
+
+            unsafe {
+                *node.data.get() = data;
+                *node.meta.get() = transmute(meta);
+            }
+        }
 
         InnerLinks::as_links(node)
     }
 
     unsafe fn from_links(ptr: *const Links) -> *const T {
-        let node: &PtrNode<T, R> = unsafe { &*InnerLinks::from_links(ptr) };
+        unsafe {
+            let node: &DynNode<R> = &*InnerLinks::from_links(ptr);
+            let meta: DynMetadata<T> = transmute(*node.meta.get());
 
-        unsafe { (*node.ptr.get()).assume_init_read() }
-    }
-
-    unsafe fn store(ptr: *const T) {
-        let node = unsafe { <T as DynLinkable<T, R>>::as_ptr_node(&*ptr) };
-
-        unsafe { (*node).store(ptr) };
+            ptr::from_raw_parts(*node.data.get(), meta)
+        }
     }
 }
 
 #[macro_export]
 macro_rules! dyn_linkable {
-    ($ty:ty, $dyn:ty, $role:ty, $field:ident) => {
-        unsafe impl $crate::DynLinkable<$dyn, $role> for $ty {
-            fn as_ptr_node(&self) -> *const $crate::PtrNode<$dyn, $role> {
+    ($ty:ty, $role:ty, $field:ident) => {
+        unsafe impl $crate::DynLinkable<$role> for $ty {
+            fn as_dyn_node(&self) -> *const $crate::DynNode<$role> {
                 ::core::ptr::from_ref(&self.$field)
             }
         }
     };
 }
 
-pub struct ListArc<T, R, U = T, A = Global>
+pub struct ListArc<T, R, A = Global>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: Allocator,
 {
     arc: Arc<T, A>,
-    _marker: PhantomData<fn() -> (*const U, R)>,
+    _marker: PhantomData<fn() -> R>,
 }
 
-impl<U, T, R, A> ListArc<T, R, U, A>
+impl<T, R, A> ListArc<T, R, A>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: Allocator,
 {
@@ -358,23 +354,20 @@ where
     }
 }
 
-impl<U, T, R, A> ListArc<T, R, U, A>
+impl<T, R, A> ListArc<T, R, A>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: AllocatorClone,
 {
     pub fn try_from_arc(arc: &Arc<T, A>) -> Option<Self> {
         let ptr = Arc::as_ptr(arc);
 
-        let links = U::as_links(ptr);
+        let links = T::as_links(ptr);
 
         if !Links::try_claim(links) {
             return None;
         }
-
-        unsafe { U::store(ptr) };
 
         Some(Self {
             arc: Arc::clone(arc),
@@ -383,10 +376,9 @@ where
     }
 }
 
-impl<U, T, R, A> Deref for ListArc<T, R, U, A>
+impl<T, R, A> Deref for ListArc<T, R, A>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: Allocator,
 {
@@ -397,37 +389,34 @@ where
     }
 }
 
-impl<U, T, R, A> Drop for ListArc<T, R, U, A>
+impl<T, R, A> Drop for ListArc<T, R, A>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: Allocator,
 {
     fn drop(&mut self) {
-        let links = U::as_links(&*self.arc);
+        let links = T::as_links(&*self.arc);
 
         Links::release(links);
     }
 }
 
-pub struct List<T, R, U = T, A = Global>
+pub struct List<T, R, A = Global>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: AllocatorClone,
 {
     ptr: *const Links,
     len: usize,
     alloc: A,
-    _marker: PhantomData<fn() -> (*const U, *const T, R)>,
+    _marker: PhantomData<fn() -> (*const T, R)>,
 }
 
-impl<U, T, R> List<T, R, U>
+impl<T, R> List<T, R>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
 {
     pub const fn new() -> Self {
@@ -435,15 +424,14 @@ where
     }
 }
 
-impl<U, T, R, A> List<T, R, U, A>
+impl<T, R, A> List<T, R, A>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: AllocatorClone,
 {
     fn get_item(&self, ptr: *const Links) -> Arc<T, A> {
-        let item = unsafe { U::from_links(ptr) };
+        let item = unsafe { T::from_links(ptr) };
 
         let arc = ManuallyDrop::new(unsafe { Arc::from_raw_in(item, self.alloc.clone()) });
 
@@ -477,7 +465,7 @@ where
         }
     }
 
-    pub fn pop_back(&mut self) -> Option<ListArc<T, R, U, A>> {
+    pub fn pop_back(&mut self) -> Option<ListArc<T, R, A>> {
         if self.is_empty() {
             return None;
         }
@@ -493,12 +481,12 @@ where
 
         self.len -= 1;
 
-        let item = unsafe { U::from_links(tail) };
+        let item = unsafe { T::from_links(tail) };
 
         Some(unsafe { ListArc::from_raw_in(item, self.alloc.clone()) })
     }
 
-    pub fn pop_front(&mut self) -> Option<ListArc<T, R, U, A>> {
+    pub fn pop_front(&mut self) -> Option<ListArc<T, R, A>> {
         if self.is_empty() {
             return None;
         }
@@ -516,13 +504,13 @@ where
 
         self.len -= 1;
 
-        let item = unsafe { U::from_links(head) };
+        let item = unsafe { T::from_links(head) };
 
         Some(unsafe { ListArc::from_raw_in(item, self.alloc.clone()) })
     }
 
-    pub fn push_front(&mut self, arc: ListArc<T, R, U, A>) {
-        let node = U::as_links(arc.into_raw());
+    pub fn push_front(&mut self, arc: ListArc<T, R, A>) {
+        let node = T::as_links(arc.into_raw());
 
         if self.is_empty() {
             Links::insert(node, node, node);
@@ -537,8 +525,8 @@ where
         self.len += 1;
     }
 
-    pub fn push_back(&mut self, arc: ListArc<T, R, U, A>) {
-        let node = U::as_links(arc.into_raw());
+    pub fn push_back(&mut self, arc: ListArc<T, R, A>) {
+        let node = T::as_links(arc.into_raw());
 
         if self.is_empty() {
             Links::insert(node, node, node);
@@ -569,10 +557,9 @@ where
     }
 }
 
-impl<U, T, R, A> Drop for List<T, R, U, A>
+impl<T, R, A> Drop for List<T, R, A>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: AllocatorClone,
 {
@@ -581,14 +568,13 @@ where
     }
 }
 
-impl<U, T, R> FromIterator<ListArc<T, R, U>> for List<T, R, U>
+impl<T, R> FromIterator<ListArc<T, R>> for List<T, R>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
 {
-    fn from_iter<I: IntoIterator<Item = ListArc<T, R, U>>>(iter: I) -> Self {
-        let mut list = List::<T, R, U>::new();
+    fn from_iter<I: IntoIterator<Item = ListArc<T, R>>>(iter: I) -> Self {
+        let mut list = List::<T, R>::new();
 
         for i in iter {
             list.push_back(i)
@@ -598,65 +584,60 @@ where
     }
 }
 
-impl<U, T, R, A> IntoIterator for List<T, R, U, A>
+impl<T, R, A> IntoIterator for List<T, R, A>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: AllocatorClone,
 {
-    type Item = ListArc<T, R, U, A>;
-    type IntoIter = IntoIter<T, R, U, A>;
+    type Item = ListArc<T, R, A>;
+    type IntoIter = IntoIter<T, R, A>;
 
     fn into_iter(self) -> Self::IntoIter {
         Self::IntoIter::new(self)
     }
 }
 
-impl<'a, U, T, R, A> IntoIterator for &'a List<T, R, U, A>
+impl<'a, T, R, A> IntoIterator for &'a List<T, R, A>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: AllocatorClone,
 {
     type Item = &'a T;
-    type IntoIter = Iter<'a, T, R, U, A>;
+    type IntoIter = Iter<'a, T, R, A>;
 
     fn into_iter(self) -> Self::IntoIter {
         Self::IntoIter::new(self)
     }
 }
 
-unsafe impl<U, T, R, A> Send for List<T, R, U, A>
+unsafe impl<T, R, A> Send for List<T, R, A>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: AllocatorClone + Send,
 {
 }
 
-pub struct Iter<'a, T, R, U = T, A = Global>
+pub struct Iter<'a, T, R, A = Global>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: AllocatorClone,
 {
-    list: &'a List<T, R, U, A>,
+    list: &'a List<T, R, A>,
     len: usize,
     links: LinksIter,
 }
 
-impl<'a, U, T, R, A> Iter<'a, T, R, U, A>
+impl<'a, T, R, A> Iter<'a, T, R, A>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: AllocatorClone,
 {
-    pub fn new(list: &'a List<T, R, U, A>) -> Self {
+    pub fn new(list: &'a List<T, R, A>) -> Self {
         Self {
             list: list,
             len: list.len(),
@@ -665,10 +646,9 @@ where
     }
 }
 
-impl<'a, U, T, R, A> DoubleEndedIterator for Iter<'a, T, R, U, A>
+impl<'a, T, R, A> DoubleEndedIterator for Iter<'a, T, R, A>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: AllocatorClone,
 {
@@ -677,14 +657,13 @@ where
 
         self.len -= 1;
 
-        Some(unsafe { &*U::from_links(ptr) })
+        Some(unsafe { &*T::from_links(ptr) })
     }
 }
 
-impl<'a, U, T, R, A> ExactSizeIterator for Iter<'a, T, R, U, A>
+impl<'a, T, R, A> ExactSizeIterator for Iter<'a, T, R, A>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: AllocatorClone,
 {
@@ -693,19 +672,17 @@ where
     }
 }
 
-impl<'a, U, T, R, A> FusedIterator for Iter<'a, T, R, U, A>
+impl<'a, T, R, A> FusedIterator for Iter<'a, T, R, A>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: AllocatorClone,
 {
 }
 
-impl<'a, U, T, R, A> Iterator for Iter<'a, T, R, U, A>
+impl<'a, T, R, A> Iterator for Iter<'a, T, R, A>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: AllocatorClone,
 {
@@ -716,33 +693,30 @@ where
 
         self.len -= 1;
 
-        Some(unsafe { &*U::from_links(ptr) })
+        Some(unsafe { &*T::from_links(ptr) })
     }
 }
 
-pub struct IntoIter<T, R, U = T, A = Global>(List<T, R, U, A>)
+pub struct IntoIter<T, R, A = Global>(List<T, R, A>)
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: AllocatorClone;
 
-impl<U, T, R, A> IntoIter<T, R, U, A>
+impl<T, R, A> IntoIter<T, R, A>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: AllocatorClone,
 {
-    pub fn new(list: List<T, R, U, A>) -> Self {
+    pub fn new(list: List<T, R, A>) -> Self {
         Self(list)
     }
 }
 
-impl<U, T, R, A> DoubleEndedIterator for IntoIter<T, R, U, A>
+impl<T, R, A> DoubleEndedIterator for IntoIter<T, R, A>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: AllocatorClone,
 {
@@ -751,10 +725,9 @@ where
     }
 }
 
-impl<U, T, R, A> ExactSizeIterator for IntoIter<T, R, U, A>
+impl<T, R, A> ExactSizeIterator for IntoIter<T, R, A>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: AllocatorClone,
 {
@@ -763,23 +736,21 @@ where
     }
 }
 
-impl<U, T, R, A> FusedIterator for IntoIter<T, R, U, A>
+impl<T, R, A> FusedIterator for IntoIter<T, R, A>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: AllocatorClone,
 {
 }
 
-impl<U, T, R, A> Iterator for IntoIter<T, R, U, A>
+impl<T, R, A> Iterator for IntoIter<T, R, A>
 where
-    U: Linkable<T, R> + ?Sized,
-    T: ?Sized,
+    T: ?Sized + Linkable<R>,
     R: Role,
     A: AllocatorClone,
 {
-    type Item = ListArc<T, R, U, A>;
+    type Item = ListArc<T, R, A>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.pop_front()
@@ -797,14 +768,14 @@ mod test {
     struct Bar;
     impl Role for Bar {}
 
-    trait ItemLike {
+    trait ItemLike: DynLinkable<Bar> {
         fn value(&self) -> u64;
     }
 
     struct Item {
         data: u32,
         foo: Node<Foo>,
-        bar: PtrNode<dyn ItemLike, Bar>,
+        bar: DynNode<Bar>,
     }
 
     impl Item {
@@ -812,13 +783,13 @@ mod test {
             Self {
                 data,
                 foo: unsafe { Node::new() },
-                bar: unsafe { PtrNode::new() },
+                bar: unsafe { DynNode::new() },
             }
         }
     }
 
     linkable! {Item, Foo, foo}
-    dyn_linkable! {Item, dyn ItemLike, Bar, bar}
+    dyn_linkable! {Item, Bar, bar}
 
     impl ItemLike for Item {
         fn value(&self) -> u64 {
@@ -833,7 +804,7 @@ mod test {
 
     const _: () = {
         fn check<T: Send + Sync>() {}
-        let _ = check::<PtrNode<dyn ItemLike, Bar>>;
+        let _ = check::<DynNode<Bar>>;
     };
 
     const _: () = {
@@ -1032,24 +1003,24 @@ mod test {
         }
     }
 
-    mod ptr_node {
+    mod dyn_node {
         use super::*;
 
         struct Thing {
             data: i32,
-            node: PtrNode<dyn ItemLike, Bar>,
+            node: DynNode<Bar>,
         }
 
         impl Thing {
             fn new(data: i32) -> Self {
                 Self {
                     data,
-                    node: unsafe { PtrNode::new() },
+                    node: unsafe { DynNode::new() },
                 }
             }
         }
 
-        dyn_linkable! {Thing, dyn ItemLike, Bar, node}
+        dyn_linkable! {Thing, Bar, node}
 
         impl ItemLike for Thing {
             fn value(&self) -> u64 {
@@ -1057,64 +1028,39 @@ mod test {
             }
         }
 
-        #[test]
-        fn blanket_stores_and_reads_pointer() {
-            struct SelfNode {
-                data: i32,
-                node: PtrNode<Self, Bar>,
-            }
-
-            impl SelfNode {
-                fn new(data: i32) -> Self {
-                    Self {
-                        data,
-                        node: unsafe { PtrNode::new() },
-                    }
-                }
-            }
-
-            dyn_linkable! {SelfNode, SelfNode, Bar, node}
-
-            let item = SelfNode::new(-2);
-
-            let links = <SelfNode as Linkable<SelfNode, Bar>>::as_links(ptr::from_ref(&item));
-
-            unsafe { <SelfNode as Linkable<SelfNode, Bar>>::store(ptr::from_ref(&item)) };
-
-            let ptr = unsafe { <SelfNode as Linkable<SelfNode, Bar>>::from_links(links) };
-
-            assert!(ptr::eq(ptr, ptr::from_ref(&item)));
-
-            assert_eq!(unsafe { &*ptr }.data, -2);
+        fn claim<R: Role>(node: *const DynNode<R>) {
+            assert!(Links::try_claim(InnerLinks::as_links(node)));
         }
 
-        fn addr(object: *const dyn ItemLike) -> *const () {
-            object.cast()
+        fn same_ptr<T: ?Sized>(left: *const T, right: *const T) -> bool {
+            if !ptr::eq(left.cast::<()>(), right.cast::<()>()) {
+                return false;
+            }
+
+            ptr::metadata(left) == ptr::metadata(right)
         }
 
         #[test]
-        fn as_ptr_node_returns_field() {
+        fn as_dyn_node_returns_field() {
             let thing = Thing::new(1);
 
             assert!(ptr::eq(
-                DynLinkable::<dyn ItemLike, Bar>::as_ptr_node(&thing),
+                DynLinkable::<Bar>::as_dyn_node(&thing),
                 ptr::from_ref(&thing.node),
             ));
         }
 
         #[test]
-        fn load_reads_stored_pointer() {
+        fn blanket_stores_and_reads_pointer() {
             let thing = Thing::new(-2);
-
             let object: *const dyn ItemLike = &thing;
 
-            let node = thing.as_ptr_node();
+            claim(thing.as_dyn_node());
 
-            unsafe { (*node).store(object) };
+            let links = <dyn ItemLike as Linkable<Bar>>::as_links(object);
+            let ptr = unsafe { <dyn ItemLike as Linkable<Bar>>::from_links(links) };
 
-            let ptr = unsafe { (*node).load() };
-
-            assert!(ptr::eq(addr(object), addr(ptr)));
+            assert!(same_ptr(object, ptr));
 
             assert_eq!(unsafe { &*ptr }.value(), -2i32 as u64);
         }
@@ -1123,22 +1069,62 @@ mod test {
         fn distinct_trait_objects() {
             let item = Item::new(1);
             let thing = Thing::new(-2);
-
             let item_object: *const dyn ItemLike = &item;
             let thing_object: *const dyn ItemLike = &thing;
 
-            unsafe { (*item.as_ptr_node()).store(item_object) };
-            unsafe { (*thing.as_ptr_node()).store(thing_object) };
+            claim(DynLinkable::<Bar>::as_dyn_node(&item));
+            claim(thing.as_dyn_node());
 
-            let loaded_item = unsafe { (*item.as_ptr_node()).load() };
-            let loaded_thing = unsafe { (*thing.as_ptr_node()).load() };
+            let item_links = <dyn ItemLike as Linkable<Bar>>::as_links(item_object);
+            let thing_links = <dyn ItemLike as Linkable<Bar>>::as_links(thing_object);
+            let loaded_item = unsafe { <dyn ItemLike as Linkable<Bar>>::from_links(item_links) };
+            let loaded_thing = unsafe { <dyn ItemLike as Linkable<Bar>>::from_links(thing_links) };
 
-            assert!(ptr::eq(addr(item_object), addr(loaded_item)));
-            assert!(ptr::eq(addr(thing_object), addr(loaded_thing)));
-            assert!(!ptr::eq(addr(loaded_item), addr(loaded_thing)));
+            assert!(same_ptr(item_object, loaded_item));
+            assert!(same_ptr(thing_object, loaded_thing));
+            assert!(!same_ptr(loaded_item, loaded_thing));
 
             assert_eq!(unsafe { &*loaded_item }.value(), 1);
             assert_eq!(unsafe { &*loaded_thing }.value(), -2i32 as u64);
+        }
+
+        #[test]
+        fn relock_stores_other_trait_object() {
+            trait Other: DynLinkable<Bar> {
+                fn tag(&self) -> i32;
+            }
+
+            impl Other for Thing {
+                fn tag(&self) -> i32 {
+                    self.data
+                }
+            }
+
+            let thing = Thing::new(-2);
+            let like: *const dyn ItemLike = &thing;
+            let other: *const dyn Other = &thing;
+
+            let links = InnerLinks::as_links(thing.as_dyn_node());
+
+            assert!(Links::try_claim(links));
+
+            let like_links = <dyn ItemLike as Linkable<Bar>>::as_links(like);
+            let loaded_like = unsafe { <dyn ItemLike as Linkable<Bar>>::from_links(like_links) };
+
+            assert!(same_ptr(like, loaded_like));
+
+            assert_eq!(unsafe { &*loaded_like }.value(), -2i32 as u64);
+
+            Links::release(links);
+
+            assert!(Links::try_claim(links));
+
+            let other_links = <dyn Other as Linkable<Bar>>::as_links(other);
+            let loaded_other = unsafe { <dyn Other as Linkable<Bar>>::from_links(other_links) };
+
+            assert!(same_ptr(other, loaded_other));
+
+            assert_eq!(unsafe { &*loaded_other }.tag(), -2);
         }
     }
 
