@@ -184,7 +184,7 @@ impl<R> Node<R>
 where
     R: Role,
 {
-    pub unsafe fn new() -> Self {
+    pub const unsafe fn new() -> Self {
         Self {
             links: Links::new(),
             _marker: PhantomData,
@@ -222,7 +222,7 @@ impl<R> DynNode<R>
 where
     R: Role,
 {
-    pub unsafe fn new() -> Self {
+    pub const unsafe fn new() -> Self {
         Self {
             links: Links::new(),
             data: UnsafeCell::new(ptr::null()),
